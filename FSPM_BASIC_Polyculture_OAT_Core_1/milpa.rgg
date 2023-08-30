@@ -1,0 +1,1744 @@
+import static parameters.*;
+import static modules_base.*;
+import static modules_organs.*;
+import static modules_light.*;
+import static SimpleSoilModule.*;
+import static RootModule.*;
+import de.grogra.rgg.AvoidIntersection;	
+import de.grogra.ray2.radiosity.Vector3d;
+import de.grogra.vecmath.geom.Line;
+import de.grogra.vecmath.geom.Intersection;
+import de.grogra.vecmath.geom.IntersectionList;
+import java.util.*;
+//import de.linearbits.newtonraphson.*; // For solving nonlinear problem for helix parameters
+
+/* Specific Milpa-modules and methods, e.g. 
+	- simpler dormancy-update for bean,
+	- avoid-intersection methods for bean/maize, 
+	- bending of bean stem around virtual pole/maize stalk, 
+	- drying of bean/maize 
+	- folding of maize stalk 
+*/
+
+/* List of things in other files:
+	- Some milpa parameters are in parameter.rgg
+	- Field layout in initiation.rgg
+*/
+/************* 
+* Parameters *
+**************/
+
+// Milpa specific parameters
+static int maizeFoldDay 	=	1000;//40;		// Number of days after emergence that farmer folds maize stems
+static int maizeFoldRank	=	9;		// Height at which maize stalk is folded (in internode number)
+
+//avoidIntersection parameters for bean and squash
+const int 		numRaysBean		 			= beanPole?100:100;				// Number of rays (default = 100)		
+const double	lengthRaysBean				= .2;				// Length of test rays											
+const boolean	showRaysBean				= false;				// True = show test rays in 3D view	
+const double	openWidthAngleBean			= 1;				// Width of the test space			
+const double	openHeightAngleBean			= 1;			// Heigth of the test space							
+const double 	predictedLengthBean			= 0.1;				// Length of translation of ray origins along the current heading	TODO make function of previous internode length or smth?
+const double	strengthOfChangeBean		= 1;				// Strength of direction change	
+const double	dist2SurfBean				= 0.01;				// Minimal distance of apex to favorNodes
+
+const int 		nrSubInternodes				= 1;				// Divide internodes into smaller sections to facilitate smoother helix-like growth.
+
+//
+const int 		numRaysSquash	 			= 100;				// Number of rays (default = 100)		
+const double	lengthRaysSquash			= .5;				// Length of test rays											
+const boolean	showRaysSquash				= false;				// True = show test rays in 3D view	
+const double	openWidthAngleSquash		= 1;				// Width of the test space		(implicitly(!) defines angle)	
+const double	openHeightAngleSquash		= 1;//1;				// Heigth of the test space							
+const double 	predictedLengthSquash		= 0.1;				// Length of translation of ray origins along the current heading	
+const double	strengthOfChangeSquash		= 1;				// Strength of direction change		
+const double	dist2SurfSquash				= 0.1;				// Minimal distance of apex to favorNodes
+	
+// Angle/collision detection bean parameters (now in apex)
+
+// other TEST stuff
+static boolean printBoolean;
+
+/*************************** 
+*  Milpa specific methods  *
+****************************/
+static boolean beanDormancy(BranchBase bb, Internode it, Apex ap, int phytDistance, int parentRank)
+{
+	if (determinate[commonbean]) {
+		if (phytDistance > ap.dom) { 
+			// bud break if phytomeric distance to apex is larger than dominance parameter
+				return false;
+		}
+		return true;
+	} else {
+		if (parentRank > 2) { 
+			// simple stochastic bud break if phytomeric distance to apex is large enough
+				float chance = random(0,1);
+				if(chance > branchConstant) { // TEST 10/3 >1, so no branching. 0.5;  (0.90)**(1.0/((ap.order+1)*(parentRank-1))) RHS approaches 1 as order or parentrank grows large.
+					return false;
+				}
+		}
+		return true;
+	}
+}
+
+/** 1. FLOWER PRODUCTION INDETERMINATE SPECIES **/
+/** 1a. Bean **/
+static void milpaProdGenPhytBean(Apex a)
+[
+	// Adjusted indeterminate flower production for common bean
+	a ==>
+	//{println("GENPHYT");}
+	{
+		a.initializeBeanArrays(nrSubInternodes);
+		findClosestPole(a);
+	}
+	if( a.order>0 && a.rank==1 ) ( // TEST 10/3: Making sure branch starts with a different direction to main stem (otherwise they just copy main stem)
+		//random direction? Then substeps with smaller perturbations?
+		RU(random(-30,0)) RL(random(-15,15)) i:Internode
+		{	
+			i.initiate(a);
+		}	
+		for(int counter=1; counter<nrSubInternodes; counter++) (
+			RU(random(0,20)) RL(random(-5,5)) ii:Internode
+			{	
+				ii.initiate(a);
+			}	
+		)
+	) else (
+		for(int counter=0; counter<nrSubInternodes; counter++) (
+			//{println("(begin for loop): a.setInitHeadingArray ["+counter+"] = "+ Arrays.toString(a.setInitHeadingArray));}
+			if(a.setInitHeadingArray[counter] == true) ( // force transformation for correct initial helix heading
+				{
+					//a.angle2Array[counter] = a.angle; // TEST 15/2
+					calcInitialHeadingTransformations(a, counter);
+					calcVirtualPointAndDir(a,counter);
+					//a.setInitHeadingArray[counter] = false; // TEST 21/2
+				}
+				if(counter == 0) ( 
+					nn:Null.(setTransform(a.m5)) // m5 is m3 inverse // TEST 21/2
+				) else ( 
+					for(int i = counter-1; i>=0; i--) ( // TEST 23/2 Just use the inverse of all local rotations since last reorientation?
+						RL(a.alpha_helix)
+						RU(-a.angle2Array[i])
+						RL(-a.alpha_helix)
+						if(a.setInitHeadingArray[i] == true) ( // 27/2 but what if i not 0? then should not take angle2[0]?
+							RL(-(90-a.alpha_helix)) 
+							//RH(-a.initangleArray[i]-(90-a.angle2Array[Math.max(i-2,0)]/2.0)) // think we should use angle2[0] because a.angle might change // TEST 9/3 updated by max(i-2,0)
+							RH(-a.initangleArray[i]-(90-a.angle2Array[i]/2.0)) // TEST 9/3 seems the error with previous line is half the difference between [i-2] and [i]
+							Null.(setTransform(a.m9)) // coord system is already same as pole. so want to negate m1 below
+							{break;} // after first reorientation we should be in correct position already.
+						)
+					)
+				)	
+				n:Null.(setTransform(a.m1)) 				// set normalized rotation component from f
+				//RH(a.initangle)	
+				//RH(90-a.angle/2.0) // correct for circumscribed polygon; edges lie outside of circle.
+				RH(a.initangleArray[counter])	 // TEST 15/3
+				RH(90-a.angle2Array[counter]/2.0) // TEST 15/3
+				RL(90-a.alpha_helix) // RH(-*) or RH(+*) gives left/right rotating difference? Could test further, maybe need to change initangle as well then.
+				{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = false;} else {a.setInitHeadingArray[counter+1] = false;}} //TEST
+			) 
+			{if( a.rpBoolean == false ) {calcVirtualPointAndDir(a,counter); checkIfCollision(a,counter);}} // TEST 16/2 + 7/3
+			if(a.locIsFreeArray[counter] == false && a.rpBoolean == false)( //some rotation that makes sure no collision
+				{a.angle2Array[counter] = calculateNewAngle(a, counter);}
+				RL(a.alpha_helix) RU(a.angle2Array[counter]) RL(-a.alpha_helix)
+				{
+					if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = true;} // adjusted the angle, so need to reorientate apex
+					//println("a = " + a.getId() + ", locIsFree false, angle2 = "+ a.angle2Array[counter]);
+				}
+			) else if ( beanPole == true && a.pmin - a.fPole.width/2 > 10**(-6) && a.pmin - a.fPole.width/2 <= a.L && a.rpBoolean == false)( // beanPole == true
+				// New location is free, but do angle + some adjustment for tighter angle
+				//{a.angle2Array[counter] = a.angle;}//a.angle; calculateNewAngle2(a, counter);} // this is a correction on the angle by max x degrees
+				{if( counter == 0 || counter == 3 || counter == 5 || counter == 6) {a.angle2Array[counter] =  calculateNewAngle2(a, counter); }//a.angle = a.angle2Array[counter]; } //TEST 14/2 
+				else {a.angle2Array[counter] = a.angle;} }
+				RL(a.alpha_helix) RU(a.angle2Array[counter]) RL(-a.alpha_helix)
+				//{println("a = " + a.getId() + ", locIsFree true, tighter angle");}
+				{if( counter == 3 || counter == 3 || counter == 5 || counter == 6 ) {a.setInitHeadingArray[counter+1] = true;} else if (counter < nrSubInternodes-1) {a.setInitHeadingArray[counter+1] = false;} else {a.setInitHeadingArray[0] = true;}}
+			) else if ( beanPole == false && a.pmin - a.fPole2.width/2 > 10**(-6) && a.pmin - a.fPole2.width/2 <= a.L && a.rpBoolean == false)( // maize stem
+				//{a.angle2Array[counter] = a.angle;}//a.angle; calculateNewAngle2(a, counter);} // this is a correction on the angle by max x degrees
+				{if( counter == 0) {a.angle2Array[counter] =  calculateNewAngle2(a, counter); }//a.angle = a.angle2Array[counter]; } //TEST 14/2 
+				else {a.angle2Array[counter] = a.angle;} }
+				RL(a.alpha_helix) RU(a.angle2Array[counter]) RL(-a.alpha_helix)
+				//{println("a = " + a.getId() + ", locIsFree true, tighter angle");}
+				{if( counter == 1) {a.setInitHeadingArray[counter+1] = true;} else if (counter < nrSubInternodes-1) {a.setInitHeadingArray[counter+1] = false;} else {a.setInitHeadingArray[0] = true;}}
+			) else if ( beanPole == true && ( a.pmin - a.fPole.width/2 > a.L || a.rpBoolean == true ) )( // beanPole == true
+				// new location is free, but we're too far from object, so RP towards pole (+- horizontal).
+				{	
+					a.rpBoolean = true;
+					Vector3d vtemp = new Vector3d(); vtemp.set(direction(a.fPole).x,direction(a.fPole).y,0); 
+					Point3d rpPoint = new Point3d(); 
+					rpPoint.set(location(a.fPole)+Math.abs(location(a).z-location(a.fPole).z)/Math.sin(angle(direction(a.fPole),vtemp))*direction(a.fPole));
+				} 
+				RP(rpPoint,1) RL(random(-10,10)) RU(random(-10,10)) RV(-.1)
+				//{println("a = " + a.getId() + ", locIsFree true, too far, RP");}
+				//{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = true;} } // adjusted the angle and orientation, so need to reorientate apex
+				{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = false;} } // TEST 7/3 cannot reorient with current setup, so just keep RP-ing until next time step
+			) else if ( beanPole == false && ( a.pmin - a.fPole2.width/2 > a.L || a.rpBoolean == true ) )( // maize stem
+				// new location is free, but we're too far from object, so RP towards pole (+- horizontal).
+				{	
+					a.rpBoolean = true;
+					Vector3d vtemp = new Vector3d(); vtemp.set(direction(a.fPole2).x,direction(a.fPole2).y,0); 
+					Point3d rpPoint = new Point3d(); 
+					rpPoint.set(location(a.fPole2)+Math.abs(location(a).z-location(a.fPole2).z+a.L*Math.sin(Math.toRadians(a.alpha_helix)))/Math.sin(angle(direction(a.fPole2),vtemp))*direction(a.fPole2));
+				} 
+				RP(rpPoint,1) RL(random(-10,10)) RU(random(-10,10)) RV(-.1)
+				//{println("a = " + a.getId() + ", locIsFree true, too far, RP");}
+				//{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = true;} } // adjusted the angle and orientation, so need to reorientate apex
+				{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = false;} } // TEST 7/3 cannot reorient with current setup, so just keep RP-ing until next time step
+			) else (
+				//{println("a = " + a.getId() + ", none of the above");} // TO DO we no longer need this else, if we remove pmin - f.diameter/2 > .02 above (but looks like we do need it)
+			)
+			{
+				//calcVirtualPointAndDir(a,counter); // TEST 22/2
+				//println("angle2Array = " + Arrays.toString(a.angle2Array)); 
+				//println("pVirtualArray = " + Arrays.toString(a.pVirtualArray));
+				////println();
+				//println("dirVirtualArray = " + Arrays.toString(a.dirVirtualArray)); 
+				//println();
+			}	
+			i:Internode 
+			{	
+				i.initiate(a);
+				if(counter == nrSubInternodes-1) {a.locIsFreeArray[0] = true;} else {a.locIsFreeArray[counter+1] = true;} // TEST 10/2
+			}	
+			//F(a.L*1.0/nrSubInternodes,0.005).(setShader(GREEN)) //TEST
+		) // end for loop
+	) // end else for branching
+
+	//[bb:BranchBase RU(30) RH(random(0,360)) aa:Apex]
+	[bb:BranchBase  aa:Apex] // TEST 10/3 remove RU(45) RH(random(0,360))
+	if(a[nrLeaves] == 2) ( // first pair of leaves
+		if(a.rpBoolean == true) ( RH(90) )
+		for (1:a[nrLeaves]) (
+			[l:Leaf {l.initiate(a);}] // TEST 16/3 added RH() for some randomness in leaf orientationl:Leaf {l.initiate(a);}]
+			RH(360/a[nrLeaves]) 
+		)
+	) else if(a[nrLeaves] == 1) ( // rest of leaves
+			//[RH(random(-45,45)) l:Leaf {l.initiate(a);}] // TEST 16/3 added RH() for some randomness in leaf orientationl:Leaf {l.initiate(a);}]
+			[RH(random(-135,-45)) l:Leaf {l.initiate(a);}] // TEST 16/6/23 try to ensure leaves grow on outside of helix?
+	) else () // this shouldn't happen anyway.
+	[RL(45) f:Flower]
+	//RH(a[phyllotaxis]+random(-10,10)) // Need to do this in a different way because of reorienting with helix.
+	a
+	{
+		f.initiate(a);
+		bb.initiate(a);
+		aa.initiateAxillary(a);
+		a.increment();
+	};
+]
+
+/** 2. VEG PRODUCTION INDETERMINATE SPECIES **/
+/** 2a. Bean **/
+static void milpaProdVegPhytBean(Apex a)
+[
+	//2. Adjusted veg. phyt. production for CLIMBING BEAN, which climbs around climbing medium
+	a ==>
+	{
+		//println("Location(a) = " + location(a));
+		a.initializeBeanArrays(nrSubInternodes);
+		findClosestPole(a);
+	}
+	if( a.order>0 && a.rank==1 ) ( // TEST 10/3: Making sure branch starts with a different direction to main stem (otherwise they just copy main stem)
+		//random direction? Then substeps with smaller perturbations?
+		RU(random(-30,0)) RL(random(-15,15)) i:Internode
+		{	
+			i.initiate(a);
+		}	
+		for(int counter=1; counter<nrSubInternodes; counter++) (
+			RU(random(0,20)) RL(random(-5,5)) ii:Internode
+			{	
+				ii.initiate(a);
+			}	
+		)
+	) else (
+		for(int counter=0; counter<nrSubInternodes; counter++) (
+			{
+				//println("(begin for loop): a.setInitHeadingArray ["+counter+"] = "+ Arrays.toString(a.setInitHeadingArray));
+			}
+			if(a.setInitHeadingArray[counter] == true) ( // force transformation for correct initial helix heading
+				{
+					calcInitialHeadingTransformations(a, counter);
+					calcVirtualPointAndDir(a,counter); // very necessary to keep this 25/4
+				}
+				if(counter == 0) ( 
+					nn:Null.(setTransform(a.m5)) // m5 is m3 inverse // TEST 21/2
+				) else ( 
+					for(int i = counter-1; i>=0; i--) ( // TEST 23/2 Just use the inverse of all local rotations since last reorientation?
+						RL(a.alpha_helix)
+						RU(-a.angle2Array[i])
+						RL(-a.alpha_helix)
+						if(a.setInitHeadingArray[i] == true) ( // 27/2 but what if i not 0? then should not take angle2[0]?
+							RL(-(90-a.alpha_helix)) 
+							//RH(-a.initangleArray[i]-(90-a.angle2Array[Math.max(i-2,0)]/2.0)) // think we should use angle2[0] because a.angle might change // TEST 9/3 updated by max(i-2,0)
+							RH(-a.initangleArray[i]-(90-a.angle2Array[i]/2.0)) // TEST 9/3 seems the error with previous line is half the difference between [i-2] and [i]
+							Null.(setTransform(a.m9)) // coord system is already same as pole. so want to negate m1 below
+							{break;} // after first reorientation we should be in correct position already.
+						)
+					)
+				)	
+				n:Null.(setTransform(a.m1)) 				// set normalized rotation component from f
+				//RH(a.initangle)	
+				//RH(90-a.angle/2.0) // correct for circumscribed polygon; edges lie outside of circle.
+				RH(a.initangleArray[counter])	 // TEST 15/3
+				RH(90-a.angle2Array[counter]/2.0) // TEST 15/3
+				RL(90-a.alpha_helix) // RH(-*) or RH(+*) gives left/right rotating difference? Could test further, maybe need to change initangle as well then.
+				{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = false;} else {a.setInitHeadingArray[counter+1] = false;}} //TEST
+			) 
+			{if( a.rpBoolean == false ) {calcVirtualPointAndDir(a,counter); checkIfCollision(a,counter);}} // TEST 16/2 + 7/3
+			if(a.locIsFreeArray[counter] == false && a.rpBoolean == false)( // collision detected on previous step and sufficiently close to pole: calc some rotation that makes sure no collision
+				{a.angle2Array[counter] = calculateNewAngle(a, counter);}
+				RL(a.alpha_helix) RU(a.angle2Array[counter]) RL(-a.alpha_helix)
+				{
+					if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = true;} // adjusted the angle, so need to reorientate apex
+					//println("a = " + a.getId() + ", locIsFree false, angle2 = "+ a.angle2Array[counter]);
+				}
+			) else if ( beanPole == true && a.pmin - a.fPole.width/2 > 10**(-6) && a.pmin - a.fPole.width/2 <= a.L && a.rpBoolean == false)( // BEANPOLE == TRUE
+				// New location is free, but do angle + some adjustment for tighter angle
+				//{a.angle2Array[counter] = a.angle;}//a.angle; calculateNewAngle2(a, counter);} // this is a correction on the angle by max x degrees
+				{if( counter == 0 || counter == 3 || counter == 5 || counter == 6) {a.angle2Array[counter] =  calculateNewAngle2(a, counter); }//a.angle = a.angle2Array[counter]; } //TEST 14/2  counter == 0 || counter == 1
+				else {a.angle2Array[counter] = a.angle;} }
+				RL(a.alpha_helix) RU(a.angle2Array[counter]) RL(-a.alpha_helix)
+				//{println("a = " + a.getId() + ", locIsFree true, tighter angle");}
+				{if( counter == 3 || counter == 3 || counter == 5 || counter == 6  ) {a.setInitHeadingArray[counter+1] = true;} else if (counter < nrSubInternodes-1) {} else {a.setInitHeadingArray[0] = true;}} //a.setInitHeadingArray[counter+1] = false;
+			) else if ( beanPole == false && a.pmin - a.fPole2.width/2 > 10**(-6) && a.pmin - a.fPole2.width/2 <= a.L && a.rpBoolean == false)( // MAIZE STEM
+				//{a.angle2Array[counter] = a.angle;}//a.angle; calculateNewAngle2(a, counter);} // this is a correction on the angle by max x degrees
+				{if( counter == 0) {a.angle2Array[counter] =  calculateNewAngle2(a, counter); }//a.angle = a.angle2Array[counter]; } //TEST 14/2 
+				else {a.angle2Array[counter] = a.angle;} }
+				RL(a.alpha_helix) RU(a.angle2Array[counter]) RL(-a.alpha_helix)
+				//{println("a = " + a.getId() + ", locIsFree true, tighter angle");}
+				{if( counter == 1) {a.setInitHeadingArray[counter+1] = true;} else if (counter < nrSubInternodes-1) {a.setInitHeadingArray[counter+1] = false;} else {a.setInitHeadingArray[0] = true;}}
+			) else if ( beanPole == true && ( a.pmin - a.fPole.width/2 > a.L || a.rpBoolean == true ) )( // beanPole == true
+				// new location is free, but we're too far from object, so RP towards pole.
+				{	
+					a.rpBoolean = true;
+					Vector3d vtemp = new Vector3d(); vtemp.set(direction(a.fPole).x,direction(a.fPole).y,0); 
+					Point3d rpPoint = new Point3d(); 
+					rpPoint.set(location(a.fPole)+Math.abs(location(a).z-location(a.fPole).z+a.L*Math.sin(Math.toRadians(a.alpha_helix)))/Math.sin(angle(direction(a.fPole),vtemp))*direction(a.fPole));
+				} 
+				RP(rpPoint,1) RL(random(-10,10)) RU(random(-10,10)) RV(-.1)
+				//{println("a = " + a.getId() + ", locIsFree true, too far, RP");}
+				//{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = true;} } // adjusted the angle and orientation, so need to reorientate apex
+				{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = false;} } // TEST 7/3 cannot reorient with current setup, so just keep RP-ing until next time step
+			) else if ( beanPole == false && ( a.pmin - a.fPole2.width/2 > a.L || a.rpBoolean == true ) )( // maize stem
+				// new location is free, but we're too far from object, so RP towards pole (+- horizontal).
+				{	
+					a.rpBoolean = true;
+					Vector3d vtemp = new Vector3d(); vtemp.set(direction(a.fPole2).x,direction(a.fPole2).y,0); 
+					Point3d rpPoint = new Point3d(); 
+					rpPoint.set(location(a.fPole2)+Math.abs(location(a).z-location(a.fPole2).z)/Math.sin(angle(direction(a.fPole2),vtemp))*direction(a.fPole2));
+				} 
+				RP(rpPoint,1) RL(random(-10,10)) RU(random(-10,10)) RV(-.1) 
+				//{println("a = " + a.getId() + ", locIsFree true, too far, RP");}
+				//{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = true;} } // adjusted the angle and orientation, so need to reorientate apex
+				{if(counter == nrSubInternodes -1) {a.setInitHeadingArray[0] = true;} else {a.setInitHeadingArray[counter+1] = false;} } // TEST 7/3 cannot reorient with current setup, so just keep RP-ing until next time step
+			) else (
+				//{println("a = " + a.getId() + ", none of the above");} // TO DO we no longer need this else, if we remove pmin - f.diameter/2 > .02 above (but looks like we do need it)
+			)
+			{
+				//calcVirtualPointAndDir(a,counter); // TEST 22/2
+				//if(counter == nrSubInternodes-1){
+				//	println();
+				//	println("angle2Array = " + Arrays.toString(a.angle2Array));
+				//	println();
+				//	println("a.pVirtualArray; \t\t\t\t\t\t\t a.dirVirtualArray");
+				//	println(String.format("%" + -80 + "s", location(a)) + "; " + a.dirVirtualArray[0]);
+				//	for(int ii = 1; ii<nrSubInternodes; ii++){
+				//		//System.out.printf("%-20s  %s\n", a.pVirtualArray[ii], a.dirVirtualArray[ii]);
+				//		//System.out.flush();
+				//		println(String.format("%" + -80 + "s", a.pVirtualArray[ii-1]) + "; " + a.dirVirtualArray[ii]);
+				//	}
+				//	println("pVirtualArray = " + Arrays.toString(a.pVirtualArray));
+				//	println();
+				//	println("dirVirtualArray = " + Arrays.toString(a.dirVirtualArray)); 
+				//	println();
+				//}
+			}	
+			i:Internode 
+			{	
+				i.initiate(a);
+				if(counter == nrSubInternodes-1) {a.locIsFreeArray[0] = true;} else {a.locIsFreeArray[counter+1] = true;} // TEST 10/2
+			}	
+			//F(a.L*1.0/nrSubInternodes,0.005).(setShader(GREEN)) //TEST
+		) // end for loop
+	) // end else for branching
+	
+	[bb:BranchBase  aa:Apex] // TEST 10/3 remove RU(45) RH(random(0,360))
+	if(a[nrLeaves] == 2) ( // first pair of leaves
+		if(a.rpBoolean == true) ( RH(90) )
+		for (1:a[nrLeaves]) (
+			[l:Leaf {l.initiate(a);}] // TEST 16/3 added RH() for some randomness in leaf orientationl:Leaf {l.initiate(a);}]
+			RH(360/a[nrLeaves]) 
+		)
+	) else if(a[nrLeaves] == 1) ( // rest of leaves
+			//[RH(random(-45,45)) l:Leaf {l.initiate(a);}] // TEST 16/3 added RH() for some randomness in leaf orientationl:Leaf {l.initiate(a);}]
+			[RH(random(-135,-45)) l:Leaf {l.initiate(a);}] // TEST 16/6/23 try to ensure leaves grow on outside of helix?
+	) else () // this shouldn't happen anyway.
+	a
+	{	
+		bb.initiate(a);
+		aa.initiateAxillary(a);
+		a.increment();
+	};
+]
+
+/** 1. FLOWER PRODUCTION INDETERMINATE SPECIES **/
+/** 1b. Squash **/
+static void milpaProdGenPhytSquash(Apex a)
+[
+	//Adjusted indeterminate flower production for squash, which expands horizontally along the soil surface
+	a ==>
+	{
+		// AvoidIntersection	
+		AvoidIntersection ai_squash_flower = new AvoidIntersection(numRaysSquash); // Create new instance of AvoidIntersection for each plant (to ensure list FavorNodes is empty, and all local settings are correct)
+		ai_squash_flower.setRange(openWidthAngleSquash, openHeightAngleSquash, predictedLengthSquash); // Set settings for test space (i.e. space that is to be explored for (un)friendly nodes)
+		ai_squash_flower.setDistance2Surface(dist2SurfSquash); // Set minimal distance to surface of favorNode
+
+		for ( (* t:aiParallelogramTile *) ) {
+			ai_squash_flower.addFavorNode(t);
+		}
+		// Addtional directional tropism
+		javax.vecmath.Vector3d fW = direction(a); 	// Head direction ('z-axis') of current apex; somehow javax.vecmath version required, otherwise direction() gives errors.
+		fW.normalize();
+		Vector3d fV = new Vector3d(random(-1.5,1.5),random(-1.5,1.5),0);
+		fV.normalize();
+		Vector3d direction = new Vector3d(fW.x+fV.x,fW.y+fV.y,0);
+		direction.normalize();
+	}
+	RD(direction, .2) // directional tropism towards horizontal plane with some randomness in x- and y-direction
+	{ai_squash_flower.look(a, lengthRaysSquash, strengthOfChangeSquash, showRaysSquash);} 
+	i:Internode
+	[bb:BranchBase RU(30) RH(random(0,360)) aa:Apex]
+	for (1:a[nrLeaves]) (
+		[l:Leaf {l.initiate(a);}]
+	RH(360/a[nrLeaves]) 
+	)
+	[RL(45) f:Flower]
+	RH(a[phyllotaxis]+random(-10,10))
+	RL(random(-2.5,2.5)) //RV(-0.6)
+	a
+	{
+		f.initiate(a);
+		i.initiate(a);
+		bb.initiate(a);
+		aa.initiateAxillary(a);
+		a.increment();
+	};
+]
+
+/** 2. VEG PRODUCTION INDETERMINATE SPECIES **/
+/** 2b. Squash **/
+static void milpaProdVegPhytSquash(Apex a)
+[
+	//3. Adjusted veg. phyt. production for SQUASH, which expands horizontally along the soil surface
+	a ==>
+	{
+		// Addtional directional tropism
+		javax.vecmath.Vector3d fW = direction(a); 	// Head direction ('z-axis') of current apex; somehow javax.vecmath version required, otherwise direction() gives errors.
+		fW.normalize();
+		Vector3d fV = new Vector3d(random(0,0.25),random(0,0.25),0);
+		fV.normalize();
+		Vector3d direction = new Vector3d(fW.x+fV.x,fW.y+fV.y,0);
+		direction.normalize();
+	}
+	if(a.cpn==1) (RU(65)) //TEST rotate first internode allignment so that avoid intersection search will always have rays that intersect tiles.
+		RD(direction, .2) // directional tropism towards horizontal plane with some randomness in x- and y-direction
+	//{println("a1 = "+ direction(a));} //TEST
+	{
+		// AvoidIntersection	
+		AvoidIntersection ai_squash_veg = new AvoidIntersection(numRaysSquash); // Create new instance of AvoidIntersection for each plant (to ensure list FavorNodes is empty, and all local settings are correct)
+		ai_squash_veg.setRange(openWidthAngleSquash, openHeightAngleSquash, predictedLengthSquash); // Set settings for test space (i.e. space that is to be explored for (un)friendly nodes)
+		ai_squash_veg.setDistance2Surface(dist2SurfSquash); // Set minimal distance to surface of favorNode
+		// AvoidIntersection	
+		AvoidIntersection ai = new AvoidIntersection(numRaysSquash); // Create new instance of AvoidIntersection for each plant (to ensure list FavorNodes is empty, and all local settings are correct)
+		ai.setRange(openWidthAngleSquash, openHeightAngleSquash, predictedLengthSquash); // Set settings for test space (i.e. space that is to be explored for (un)friendly nodes)
+		ai.setDistance2Surface(dist2SurfSquash); // Set minimal distance to surface of favorNode
+				
+		// Add tiles to favor nodes
+		for ( (* t:aiParallelogramTile *) ) {
+			ai_squash_veg.addFavorNode(t);
+		}
+		//ai_squash_veg.printNodes(); // TEST, method in avoidIntersection class to print list favorNodes. SEE ECLIPSE
+		ai_squash_veg.look(a, lengthRaysSquash, strengthOfChangeSquash, showRaysSquash);
+	} 
+	i:Internode
+	[bb:BranchBase RU(45) RH(random(0,360)) aa:Apex]
+	for (1:a[nrLeaves]) (
+		[l:Leaf {l.initiate(a);}]
+	RH(360/a[nrLeaves]) 
+	)
+	RH(a[phyllotaxis]+random(-10,10))
+	//RL(random(-2.5,2.5))  //RV(-0.6)
+	a
+	{	
+		i.initiate(a);
+		bb.initiate(a);
+		aa.initiateAxillary(a);
+		a.increment();
+	}
+	
+	//{println("squash removedynamic"); aiRemoveDynamic();} // derive(); aiRemoveDynamic();
+	;
+]
+
+static void foldMaize() //TO DO also rotate bean if already wrapped around maize? What about collisions etc.?
+[
+	{float angle = random(0,360);}
+	// Rotate internode
+	i:Internode, (milpa == true && i.species == maize && time == maizeFoldDay && i.rank == maizeFoldRank) ==> 
+	RH(angle) RU(150) i;
+	// Rotate corresponding leaf attached to bottom of rotated internode
+	(* l:Leaf <+ ii:Internode (-->)+ i:Internode, (i.rank==maizeFoldRank && ii.rank==maizeFoldRank-1) *), l, (time == maizeFoldDay) ==> 
+	RH(angle) RU(-150) l;
+	// Remove RV rotations, to prevent maize stalk from curling upwards again
+	(* rv:RV (<--)+ iii:Internode, (iii.rank==maizeFoldRank) *), rv ==> ; 
+]	
+
+/***************************************************************************** 
+*  AvoidIntersection methods (partly redundant now with new angle approach?  *
+*****************************************************************************/
+// Method to query for relevant dynamic structures and call relevant methods to add copies.
+static void aiQueryDynamic()
+{
+	//derive(); // not sure if this is necessary.
+	
+	//[(* l:Leaf (<+){1} (<--)? i:Internode  *)   ==>  {aiLeaf(l.species, l.petioleLength, l.petioluleLength, l.segments, l.length, i.increment, l.width, l.area, l.angle, l.bendingAngleSegment, l.rand1, l.leafFracture, l.nrLeaflets, l);};]; // find leaf node
+	[(* l:Leaf, (l.species == maize) *)   ==>  {aiLeaf(l.species, l.petioleLength, l.petioluleLength, l.segments, l.length, l.width, l.area, l.angle, l.bendingAngleSegment, l.rand1, l.leafFracture, l.nrLeaflets, l);};]; // find leaf node
+	
+	[(* i:Internode, (i.species == maize || i.species == commonbean) *)  ==>  {aiInternode(i.length, i.width, i.species, i);};]; // find internode node 
+	
+	//derive();
+	//[(* f:Flower *)  ==>  {aiFlower(i.length, i.width, i);};]; // find flower node
+}
+
+static void aiQueryStatic()
+{
+	[(* t:Tile *) ==> {aiTile(t.length, t.width, t);};]; // find tile node
+	//println("aiQueryStatic tile");
+	//[(* p:Pole *),  ==> {aiPole(t.length, t.width, t);};]; // find pole node
+}
+
+// makeGraph methods
+static void aiTile(float length, float width, Node node) //RR milpa ai TEST
+{
+	makeGraph ==> node [ RL(90) M(-length/2) aiParallelogramTile(length,width)]; //Insert a copy after the node; so move turtle back by **.
+}
+
+static void aiPole(float length, float width, Node node) //RR milpa ai TEST
+{
+	makeGraph ==> node [M(-length) aiCylinderPole(length,width)]; //Insert a copy after the node; so move turtle back by **.
+}
+
+static void aiInternode(float length, float width, int species, Node node) //RR milpa ai TEST
+{
+	makeGraph ==> node [M(-length) aiCylinder(length,width/2,species)]; //Insert a copy after the node; so move turtle back by **.
+}
+
+static void aiLeaf(int species, double petioleLength, double petioluleLength, long segments, float length, double width, double area, double angle, double bendingAngleSegment, double rand1, double rand2, int nrLeaflets, Node node) 
+{
+	makeGraph ==> node 
+	[ 
+		M(-length) 
+		// Petiole/sheath
+		if (area > 0.000001) ( // to do area not given as argument?
+			if (species == cereal || species == grass || species == maize) (
+				RL(2.5)
+				aiParallelogram(petioleLength, petioleLength/sheathscalefactor)
+				RL(angle-2.5)
+			) else if (species == squash) (
+				AdjustLU RL(-90+rand1) RV(-0.6) 
+				aiCylinder(petioleLength, petioleLength/40,species)
+			) else (
+				RL(angle)
+				aiCylinder(petioleLength, petioleLength/40,species)
+			)	
+			// Leaflets
+			if (nrLeaflets > 1 && species == commonbean) (RU(-70)) else if (nrLeaflets > 1) (RU(-90))
+			for (double q=1; q <= nrLeaflets; q++)
+			(
+				if (q==2 && species == commonbean) ( 
+					//Leaflet(species, petioluleLength*3, leafLayer, sRFR, weed, fabs, rfr, segments, length*1.2, width*1.5, bendingAngleSegment, 2, nrLeaflets)
+					// petiolules
+					[if (nrLeaflets > 1) ( 
+						aiCylinder(3*petioluleLength, 3*petioluleLength/(3*20),species)
+					)
+					// leaflets
+					for (double i=1; i < segments; i++)
+					(
+						{
+							double segmentLength;
+							segmentLength = length*1.2/segments;
+							double segmentWidth = 0.5*width*1.5*getNormalizedLeafWidth(1-i/segments,species);
+						}
+						aiParallelogram(segmentLength,2*segmentWidth)
+						RL(bendingAngleSegment)
+					)]
+				)
+				else (
+					//Leaflet(species, petioluleLength, leafLayer, sRFR, weed, fabs, rfr, segments, length, width, bendingAngleSegment, leafFracture, nrLeaflets)
+					// petiolules
+					[if (nrLeaflets > 1 && species == commonbean && q==2) ( 
+						aiCylinder(petioluleLength, petioluleLength/(3*20),species)
+					)
+					else if (nrLeaflets > 1) ( 
+						aiCylinder(petioluleLength, petioluleLength/20,species)
+					)
+					// leaflets
+					for (double i=1; i < segments; i++)
+					(
+						{
+							double segmentLength;
+							segmentLength = length/segments;
+							double segmentWidth = 0.5*width*getNormalizedLeafWidth(1-i/segments,species);
+						}
+						aiParallelogram(segmentLength,2*segmentWidth)
+						if (i == segments/2 && species==maize && rand2 > 0.65) ( 
+							RL(bendingAngleSegment*20)
+						) else (
+						RL(bendingAngleSegment)
+						)
+					)]
+				)
+				if (nrLeaflets > 1 && species == commonbean) (RU(2*70/(nrLeaflets-1))) else if (nrLeaflets > 1) (RU(180/(nrLeaflets-1))) 
+			)
+		)	
+	];	
+}
+
+// Base volumes methods (to make them removable without removing e.g. all parallelograms)
+module aiParallelogram(float len, float width) extends Parallelogram(len,width) //RR milpa ai TEST
+{{setShader(RED); setLayer(14);};}
+
+module aiParallelogramTile(float len, float width) extends Parallelogram(len,width) //RR milpa ai TEST
+{{setShader(RED); setLayer(14);};}
+
+module aiCylinder(float len, float width, int species2) extends Cylinder(len,width/2.0) //RR milpa ai TEST
+{int species; {species = species2; setShader(RED); setLayer(2);};}
+
+module aiCylinderPole(float len, float width) extends Cylinder(len,width/2.0) //RR milpa ai TEST
+{{setShader(RED); setLayer(2);};}
+
+module aiSphere(float rad) extends Sphere(rad) //RR milpa ai TEST Not sure if this one is necessary. Maybe for squash fruits?
+{{setShader(RED); setLayer(14);};}
+
+
+// Remove method
+static void aiRemoveDynamic() // Remove all added volume copies that change size/orientation/position over time
+{
+	derive(); 
+	
+	// leaf	
+	[(* aip:aiParallelogram (<--)+ m:M (<+){1} Leaf *), m ==>> ;]; // TO DO check if we actually start with M(). Otherwise change this. (+>)? m:M 
+	//derive(); 
+	
+	// internode
+	[(* i:Internode (+>){1} m:M aic:aiCylinder *), m ==>> ;]; 
+	derive();
+	
+	// flower?
+	//[(* m:M (>)? f:aiCylinder *), m f ==>> ;];
+	//{derive();};
+} 
+
+static void aiRemoveStatic() // Remove all added volume copies that do not change size/orientation/position over time (e.g. poles, tiles)
+// Don't think this method is actually needed, as the scene clears automatically at the end of a simulation.
+{
+	// pole
+	//[(* p:aiCylinderPole *), p ==>> ;]; // We add these directly in initiation, so don't think we need to remove them here.
+	//{derive();};
+	
+	// Tile
+	[(* Tile (+>)+ r:RL M *), r ==>> ;]; 
+	derive();
+} 
+
+/********************************************************************************************** 
+*  Methods for calculating angles/reorienting/collision detection for helicoidal growth bean  *
+**********************************************************************************************/
+static double calculateNewAngle(Apex a, int counter) // Collision detected; calculate new angle
+{
+	printBoolean = true;
+	for(double angle2 = Math.max(90,a.angle); angle2 > -90; angle2--){// left-turning
+		a.angle2Array[counter] = angle2; // TEST 15/2
+		calcVirtualPointAndDir(a,counter);
+		checkIfCollision(a, counter);
+		if(angle2 == 90){printBoolean = false;}
+		if(a.locIsFreeArray[counter] == true){
+			//println("a.initangleArray \t  "+ Arrays.toString(a.initangleArray));
+			//println("a.angle2Array \t  "+ Arrays.toString(a.angle2Array)); 
+			//println("a.angle2OriginalArray " + Arrays.toString(a.angle2OriginalArray)); 
+			//println();
+			return angle2;
+		}
+		//print("cdcr ");
+	}
+	return 0;
+}
+
+static double calculateNewAngle2(Apex a, int counter) // No collision detected, but adjust angle for tighter coiling
+{
+	printBoolean = true;
+	//println(" calcNewAngle tighten ");
+	for(double angle2 = a.angle + 25; angle2 >= a.angle; angle2--){ // left-turning
+		a.angle2Array[counter] = angle2; // TEST 15/2
+		calcVirtualPointAndDir(a,counter);
+		checkIfCollision(a, counter);
+		if(angle2 == a.angle + 25){printBoolean = false;}
+		if(a.locIsFreeArray[counter] == true){
+			//println("a.initangleArray \t  "+ Arrays.toString(a.initangleArray));
+			//println("a.angle2Array \t  "+ Arrays.toString(a.angle2Array)); 
+			//println("a.angle2OriginalArray " + Arrays.toString(a.angle2OriginalArray)); 
+			//println();
+			return angle2;
+		}
+		//print("cdt ");
+	}
+	return 0;
+}
+
+static double calculateAngle(Apex a)
+{
+	double result = 0;
+	double 	Lactual = a.L/nrSubInternodes*Math.cos(Math.toRadians(a.alpha_helix));
+	result = 2.0*Math.PI/Math.max(3,Math.round(Math.PI/Math.asin(Lactual/(2.0*a.R))));
+	return Math.toDegrees(result);
+}
+
+static double calculateAngle2(Apex a)
+{
+	double result = 0;
+	double 	Lactual = 1.0*a.L/nrSubInternodes*Math.cos(Math.toRadians(a.alpha_helix));
+	result = 2.0*Math.PI/Math.max(3,Math.round(Math.PI/Math.atan(Lactual/(2.0*a.R))));
+	//println("Lactual, a.R, calcAngle2 result: "+ Lactual + "," + a.R + "," + Math.toDegrees(result)); 
+	return Math.toDegrees(result);
+}
+
+
+
+static void findClosestPole(Apex a) 
+{
+	if(beanPole == true) {
+		aiCylinderPole ftemp = a.fPole;	// TEST 10/2 3D distance instead of only x,y plane 
+		a.pmin = 100;
+		for((*ff:aiCylinderPole*)) { // find closest Pole 
+			// TO DO update to include other objects than pole?
+			a.p1.set(location(a));
+			de.grogra.vecmath.Math2.invTransformPoint(transformation(ff), a.p1);	
+			//println("p1 = "+p1);
+			if( a.p1.z < 0) {
+				if(Math.sqrt(a.p1.x**2+a.p1.y**2+a.p1.z**2) < a.pmin ){  //&& a.p1.z < ff.len && a.p1.z >= 0
+					a.pmin = Math.sqrt(a.p1.x**2+a.p1.y**2+a.p1.z**2);
+					a.fPole = ff;	
+				}
+			} else if( a.p1.z > ff.len ) {
+				if(Math.sqrt(a.p1.x**2+a.p1.y**2+(a.p1.z-ff.len)**2) < a.pmin ){  //&& a.p1.z < ff.len && a.p1.z >= 0
+					a.pmin = Math.sqrt(a.p1.x**2+a.p1.y**2+(a.p1.z-ff.len)**2);
+					a.fPole = ff;	
+				}
+			} else {
+				if(Math.sqrt(a.p1.x**2+a.p1.y**2) < a.pmin ){  //&& a.p1.z < ff.len && a.p1.z >= 0
+					a.pmin = Math.sqrt(a.p1.x**2+a.p1.y**2);
+					a.fPole = ff;	
+				}
+			}
+		}
+		if( a.fPole != ftemp && a.pmin < .2 && a.pmin > a.fPole.width/2 ) { a.setInitHeadingArray[0] = true; }
+	} else {
+		Internode ftemp = a.fPole2;	// TEST 10/2 3D distance instead of only x,y plane 
+		a.pmin = 100;
+		for((*ff:Internode, (ff.species==maize && ff.length > 0 && ORIGIN.distance(location(ff)) != 0)*)) { // find closest internode
+			// TO DO strange that there are internodes with loc=origin and non-zero length. also loops in graph maize!
+			a.p1.set(location(a));
+			de.grogra.vecmath.Math2.invTransformPoint(transformation(ff), a.p1);	
+			//println("loc(a) = " + location(a));
+			//println("p1 = "+ a.p1);
+			//println("ff internode loc = " + location(ff) + "; length = " + ff.length);
+			if( a.p1.z < 0) {
+				if(Math.sqrt(a.p1.x**2+a.p1.y**2+a.p1.z**2) < a.pmin ){  //&& a.p1.z < ff.len && a.p1.z >= 0
+					a.pmin = Math.sqrt(a.p1.x**2+a.p1.y**2+a.p1.z**2);
+					a.fPole2 = ff;	
+				}
+			} else if( a.p1.z > ff.length ) {
+				if(Math.sqrt(a.p1.x**2+a.p1.y**2+(a.p1.z-ff.length)**2) < a.pmin ){  //&& a.p1.z < ff.len && a.p1.z >= 0
+					a.pmin = Math.sqrt(a.p1.x**2+a.p1.y**2+(a.p1.z-ff.length)**2);
+					a.fPole2 = ff;	
+				}
+			} else {
+				if(Math.sqrt(a.p1.x**2+a.p1.y**2) < a.pmin ){  //&& a.p1.z < ff.len && a.p1.z >= 0
+					a.pmin = Math.sqrt(a.p1.x**2+a.p1.y**2);
+					a.fPole2 = ff;	
+				}
+			}
+		}
+		if( a.fPole2 != ftemp && a.pmin < .2 && a.pmin > a.fPole2.width/2 ) { a.setInitHeadingArray[0] = true; }
+		//println("Pmin = "+a.pmin);
+		//println("fPole2 = "+ a.fPole2);
+	} 
+}
+
+static void calcInitialHeadingTransformations(Apex a, int counter) 
+{
+	if( counter == 0 ){a.p1.set(location(a));} else {a.p1.set(a.pVirtualArray[counter-1]);} // need location of counter-th subinternode
+	if(beanPole == true) {
+		de.grogra.vecmath.Math2.invTransformPoint(transformation(a.fPole), a.p1); // p1 in coordinate system of f
+		a.R = Math.max(a.fPole.width/2, Math.sqrt(a.p1.x**2+a.p1.y**2))*1.0; // //TO DO optionally * small constant?	
+	} else {
+		de.grogra.vecmath.Math2.invTransformPoint(transformation(a.fPole2), a.p1); // p1 in coordinate system of f
+		a.R = Math.max(a.fPole2.width/2, Math.sqrt(a.p1.x**2+a.p1.y**2))*1.0; // //TO DO optionally * small constant?
+	}
+	a.angle = calculateAngle(a);// calculateAngle2(a);
+	for(int i = counter; i<nrSubInternodes; i++){
+		a.angle2Array[i] = a.angle; // TEST 20/2 to make sure angle2Array is never empty
+		a.angle2OriginalArray[i] = a.angle;
+	}
+		//println("location a = " + location(a) + ", location f = " + location(a.fPole));
+		//println("a.R = "+a.R + "; a.angle (calcangle2) in calcInitHead = "+a.angle + ", counter = "+counter);
+		//println("location a.p1 in terms of fPole = " + a.p1 + "; fpole = " + a.fPole);
+	calcGamma(a, counter);
+}
+
+static void calcGamma(Apex a, int counter)
+{
+	if(a.p1.y>=0 && a.p1.x>0) { // 1st quadrant incl. y=0
+		a.initangle = 90+Math.toDegrees(Math.abs(Math.atan(1.0*a.p1.y/a.p1.x)));
+	} else if(a.p1.y>0 && a.p1.x<0) { // 2nd quadrant
+		a.initangle = -90-Math.toDegrees(Math.abs(Math.atan(1.0*a.p1.y/a.p1.x)));
+	} else if(a.p1.y<=0 && a.p1.x<0) { // 3rd quadrant incl. y=0
+		a.initangle = -90+Math.toDegrees(Math.abs(Math.atan(1.0*a.p1.y/a.p1.x)));
+	} else if(a.p1.y<0 && a.p1.x>0) { // 4th quadrant
+		a.initangle = 90-Math.toDegrees(Math.abs(Math.atan(1.0*a.p1.y/a.p1.x)));
+	} else if(a.p1.y>0 && a.p1.x==0) { // x=0, y>0
+		a.initangle = 180; 
+	} else if(a.p1.y<0 && a.p1.x==0) { // x=0, y<0
+		a.initangle = 0; 
+	} else { a.initangle = 0; } // (x,y)=(0,0)	
+	
+	for(int i = counter; i<nrSubInternodes; i++){
+		a.initangleArray[i] = a.initangle; // TEST 23/2 for transforming back to global on reorienting in local rotations.
+	}
+	//println("initangle = " + a.initangle);	
+}
+
+static void calcVirtualPointAndDir(Apex a, int counter)
+{
+	if( counter == 0 ) {
+		a.pVirtualArray[0].set(location(a)); 
+		a.dirVirtualArray[0].set(direction(a));
+	}
+	
+	if (a.setInitHeadingArray[counter] == true) {
+		// Calculate global coordinates of next point for collision detection (see also above for more info) 
+		if(beanPole == true) { transformation(a.fPole).toMatrix4d().get(a.m1); } // global to local rotation transformation for f
+		else{ transformation(a.fPole2).toMatrix4d().get(a.m1); }
+		a.m2.rotZ(Math.toRadians(a.initangle+90-a.angle/2.0)); 
+		a.m4.rotY(Math.toRadians(a.angle2Array[counter])); // TEST 15/3 this seems to solve tighten at step 0 issue
+		a.m6.rotX(Math.toRadians(90)); 
+		a.m8.rotX(Math.toRadians(-a.alpha_helix)); 
+		transformation(a).toMatrix4d().get(a.m3); a.m5.invert(a.m3); 
+		a.m9.invert(a.m1); 
+		a.m7.mul(a.m1,a.m2); a.m7.mul(a.m7,a.m6); a.m7.mul(a.m7,a.m4); a.m7.mul(a.m7,a.m8); a.m7.mul(a.m7,a.m5); // m7 = m1*m2*m6*m4*m8*m5
+		
+		if(counter == 0) { 
+			transformation(a).toMatrix4d().get(a.MMatrixArray[0]); // set M_0	
+			//a.MProductMatrixArray[0].set(a.MMatrixArray[0]);
+			a.v1.set(direction(a)); a.m7.transform(a.v1); a.v1.normalize(); // v_0; direction pointing towards p1
+			a.p2.set(a.pVirtualArray[0]+a.v1*a.L/nrSubInternodes); // p1; p0 + perturbation of length L
+		} else { // counter != 0
+			Matrix3d mtemp = new Matrix3d(); 
+			//Matrix3d mtemp2 = new Matrix3d(); //
+			/** We are currently at step 'counter', where we predict the location/direction of the counter-th internode (starting at 0).
+			    We reorient at the start of this step. 
+			    A = reoriented at start step counter-1;	B = not reoriented at start step counter-1 
+			    a = collision detected on step counter-1; b = used tighter turn on step counter-1
+			    1 = collision detected on step counter; 2 = used tighter turn on step counter
+			    8 combinations in total, of which some might have the same solution (e.g. 7 and 8)
+			**/
+			a.m6.rotZ(Math.toRadians( a.initangleArray[counter]-a.initangleArray[Math.max(0,counter-1)] +a.angle2OriginalArray[counter]/2  )); mtemp.mul(a.m1,a.m6); // part 1
+			a.m6.rotZ(Math.toRadians( -(a.angle2Array[counter-1]-a.angle2OriginalArray[counter-1]) + a.angle2OriginalArray[counter-1]/2 )); mtemp.mul(mtemp,a.m6); // part 2
+			a.m6.rotZ(Math.toRadians( -(a.angle2OriginalArray[counter]-a.angle2Array[counter]) )); mtemp.mul(mtemp,a.m6); // correction for tightening or collision instead of ending up on new polygon.
+			for(int i = counter-1; i>=0; i--){ // correction for \gamma^*
+				a.m6.rotZ(Math.toRadians(-a.angle2OriginalArray[i])); mtemp.mul(mtemp,a.m6); 
+				if(a.setInitHeadingArray[i] == true) {
+					break;
+				}
+			}
+			if(a.setInitHeadingArray[counter-1] == true && a.setInitHeadingArray[counter] == true) { 
+				a.m6.rotZ(Math.toRadians((a.angle2Array[counter-1]-a.angle2OriginalArray[counter-1])/2)); mtemp.mul(mtemp,a.m6); 
+			}
+			mtemp.mul(mtemp,a.m9);			
+			a.MMatrixArray[counter].set(mtemp); // M_counter
+			//a.MProductMatrixArray[counter].mul(mtemp,a.MProductMatrixArray[counter-1]); // product M_counter * ... * M_0
+			a.v1.set(a.dirVirtualArray[counter-1]); 
+			mtemp.transform(a.v1); a.v1.normalize(); // v_n
+			a.p2.set(a.pVirtualArray[counter-1]+a.v1*a.L/nrSubInternodes); // pn+1 
+		}
+	} else { // setInitHeading == false
+		// Calculate global coordinates of next point for collision detection
+		if(counter == 0) { a.m4.rotZ(Math.toRadians(a.angle)); } else { a.m4.rotZ(Math.toRadians(a.angle2Array[counter]));  } 
+		a.m6.rotX(Math.toRadians(a.alpha_helix)); // Interpret as local rotation around left-axis
+		a.m8.rotX(Math.toRadians(-a.alpha_helix)); // Interpret as local rotation around left-axis
+		transformation(a).toMatrix4d().get(a.m3); // global to local rotation transformation for a
+		a.m5.invert(a.m3); // local to global transformation for a
+		a.m6.mul(a.m3,a.m6); a.m7.mul(a.m6,a.m4); a.m8.mul(a.m8,a.m5); a.m7.mul(a.m7,a.m8); // m7 = m3*m6*m4*m8*m5 (* = matrix product)
+		a.m9.invert(a.m1); 
+		
+		if(counter == 0) { 
+			transformation(a).toMatrix4d().get(a.MMatrixArray[0]); 
+			a.MProductMatrixArray[0].set(a.MMatrixArray[0]);
+			a.v1.set(a.dirVirtualArray[0]); a.m7.transform(a.v1); a.v1.normalize(); // v_n
+			a.p2.set(a.pVirtualArray[0]+a.v1*a.L/nrSubInternodes); // pn
+		}
+		if(counter != 0) {
+			// Assembling M_counter 
+			Matrix3d mtemp = new Matrix3d(); 
+			mtemp.mul(a.m1,a.m4); mtemp.mul(mtemp,a.m9); 
+			a.MMatrixArray[counter].set(mtemp); // M_counter
+			//a.MProductMatrixArray[counter].mul(a.MMatrixArray[counter],a.MProductMatrixArray[counter-1]); // product M_counter * ... * M_0
+			a.v1.set(a.dirVirtualArray[counter-1]); 
+			//if(printBoolean == true){println("a.v1 = " + a.v1);}
+			mtemp.transform(a.v1); a.v1.normalize(); // v_n
+			a.p2.set(a.pVirtualArray[counter-1]+a.v1*a.L/nrSubInternodes); // 
+		}
+	}
+	a.pVirtualArray[counter].set(a.p2);
+	a.dirVirtualArray[counter].set(a.v1);
+}
+
+static void checkIfCollision(Apex a, int counter)
+{
+	// Determine if collision occurs
+	// Find two vectors orthogonal to each other and current direction
+	Point3d p2copy = new Point3d();
+	javax.vecmath.Vector3d f1 = new javax.vecmath.Vector3d();
+	javax.vecmath.Vector3d f2 = new javax.vecmath.Vector3d();
+	javax.vecmath.Vector3d f3 = new javax.vecmath.Vector3d();
+	f1.set(a.v1); 	// Head direction ('z-axis'); somehow javax.vecmath version required, otherwise direction() gives errors.
+	javax.vecmath.Vector3d unit = new javax.vecmath.Vector3d(f1.x,-f1.y,f1.z);
+	f2.cross(f1, unit);							// orthogonal vector to W ('y-axis')
+	f2.normalize();
+	f3.cross(f1, f2);							// orthogonal vector to both W and U ('x-axis')
+	f3.normalize();
+	
+	if( beanPole == true) {
+		// line 1
+		if(counter == 0) { 
+			p2copy.set(maxWidthInt[commonbean]/2,0,0); // copy of p2 for temporary use
+			a.m5.transform(p2copy); // m5 is M0 inverse
+		} else {
+			p2copy.set(maxWidthInt[commonbean]/2*f2); // copy of p2 for temporary use
+		}  
+		//println(counter + " p2copy transformed = "+p2copy); println("p2copy+a.p2 = " + (p2copy+a.p2));
+		Line tempLine = new Line(); 
+		if(counter==0) {tempLine.origin.set(p2copy+location(a));} else {tempLine.origin.set(p2copy+a.pVirtualArray[counter-1]);} tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+		if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);} // TEST 10/3 Extra check if start location is not already within pole (to prevent internode fully inside pole
+		for((*ftemp2:aiCylinderPole*)) {
+			if(counter == 0) { 
+				p2copy.set(maxWidthInt[commonbean]/2,0,0); // copy of p2 for temporary use
+				a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+				p2copy.set(maxWidthInt[commonbean]/2*f2); // copy of p2 for temporary use
+			}  
+			if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);}
+			//
+			de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy);  // TEST 10/3 Extra check 
+			IntersectionList isList = intersect(tempLine, volume(ftemp2));
+			//println("isList = " + isList);
+			//println("tempLine = " + tempLine);
+			if( isList.size == 0 && (Math.sqrt(p2copy.x**2+p2copy.y**2) > (ftemp2.width/2)*1.0 || p2copy.z < 0 || p2copy.z > ftemp2.len) ) { // TEST 10/3 Extra check
+				a.locIsFreeArray[counter] = true; 
+				//println("No collision, p2copy = " + p2copy + "; distance to center f = " + Math.sqrt(p2copy.x**2+p2copy.y**2) + "; f radius = " +  (ftemp2.width/2));
+			} else {// collision
+				a.locIsFreeArray[counter] = false;
+				//println("collision detected,  p2copy = " + p2copy + "; distance to center f = " + Math.sqrt(p2copy.x**2+p2copy.y**2) + "; f radius = " +  (ftemp2.width/2));
+				//if(printBoolean == true){println("collision, isList = " + isList);}
+				break; // to do does this break out of for loop? Yes.
+			}
+		}	
+		// line 2
+		if(a.locIsFreeArray[counter] == true) {
+			if(counter == 0) { 
+				p2copy.set(-maxWidthInt[commonbean]/2,0,0); // copy of p2 for temporary use
+				a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+				p2copy.set(-maxWidthInt[commonbean]/2*f2); // copy of p2 for temporary use
+			}  
+			//println(counter + " p2copy transformed = "+p2copy);
+			if(counter==0) {tempLine.origin.set(p2copy+location(a));} else {tempLine.origin.set(p2copy+a.pVirtualArray[counter-1]);} tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);} // TEST 10/3 Extra check if start location is not already within pole (to prevent internode fully inside pole
+			for((*ftemp2:aiCylinderPole*)) {
+				if(counter == 0) { 
+					p2copy.set(-maxWidthInt[commonbean]/2,0,0); // copy of p2 for temporary use
+					a.m5.transform(p2copy); // m5 is M0 inverse
+				} else {
+					p2copy.set(-maxWidthInt[commonbean]/2*f2); // copy of p2 for temporary use
+				} 
+				if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);}
+				de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy);  // TEST 10/3 Extra check 
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				//println("tempLine = " + tempLine);
+				if( isList.size == 0 && (Math.sqrt(p2copy.x**2+p2copy.y**2) > (ftemp2.width/2)*1.0 || p2copy.z < 0 || p2copy.z > ftemp2.len) ) { // TEST 10/3 Extra check
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					//if(printBoolean == true){println("collision detected, p2copy = " + p2copy);}
+					break; // to do does this break out of for loop? Yes.
+				}
+			}
+		}	
+		// line 3
+		if(a.locIsFreeArray[counter] == true) {
+			if(counter == 0) { 
+				p2copy.set(0,maxWidthInt[commonbean]/2,0); // copy of p2 for temporary use
+				a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+				p2copy.set(maxWidthInt[commonbean]/2*f3); // copy of p2 for temporary use
+			}  
+			//println(counter + " p2copy transformed = "+p2copy);
+			if(counter==0) {tempLine.origin.set(p2copy+location(a));} else {tempLine.origin.set(p2copy+a.pVirtualArray[counter-1]);} tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);} // TEST 10/3 Extra check if start location is not already within pole (to prevent internode fully inside pole
+			for((*ftemp2:aiCylinderPole*)) {
+				if(counter == 0) { 
+					p2copy.set(0,maxWidthInt[commonbean]/2,0); // copy of p2 for temporary use
+					a.m5.transform(p2copy); // m5 is M0 inverse
+				} else {
+					p2copy.set(maxWidthInt[commonbean]/2*f3); // copy of p2 for temporary use
+				}
+				if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);}
+				de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy);  // TEST 10/3 Extra check 
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				//println("tempLine = " + tempLine);
+				if( isList.size == 0 && (Math.sqrt(p2copy.x**2+p2copy.y**2) > (ftemp2.width/2)*1.0 || p2copy.z < 0 || p2copy.z > ftemp2.len) ) { // TEST 10/3 Extra check
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					//if(printBoolean == true){println("collision detected, p2copy = " + p2copy);}
+					break; // to do does this break out of for loop? Yes.
+				}
+			}
+		}
+		// line 4
+		if(a.locIsFreeArray[counter] == true) {
+			if(counter == 0) { 
+				p2copy.set(0,-maxWidthInt[commonbean]/2,0); // copy of p2 for temporary use
+				a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+				p2copy.set(-maxWidthInt[commonbean]/2*f3); // copy of p2 for temporary use
+			}  
+			//println(counter + " p2copy transformed = "+p2copy);
+			if(counter==0) {tempLine.origin.set(p2copy+location(a));} else {tempLine.origin.set(p2copy+a.pVirtualArray[counter-1]);} tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);} // TEST 10/3 Extra check if start location is not already within pole (to prevent internode fully inside pole
+			for((*ftemp2:aiCylinderPole*)) {
+				if(counter == 0) { 
+					p2copy.set(0,-maxWidthInt[commonbean]/2,0); // copy of p2 for temporary use
+					a.m5.transform(p2copy); // m5 is M0 inverse
+				} else {
+					p2copy.set(-maxWidthInt[commonbean]/2*f3); // copy of p2 for temporary use
+				} 
+				if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);}
+				de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy);  // TEST 10/3 Extra check 
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				//println("tempLine = " + tempLine);
+				if( isList.size == 0 && (Math.sqrt(p2copy.x**2+p2copy.y**2) > (ftemp2.width/2)*1.0 || p2copy.z < 0 || p2copy.z > ftemp2.len) ) { // TEST 10/3 Extra check
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					//if(printBoolean == true){println("collision detected, p2copy = " + p2copy);}
+					break; // to do does this break out of for loop? Yes.
+				}
+			}
+		}
+	} else { // maize stem instead of pole
+		// line 1
+		if(counter == 0) { 
+			p2copy.set(maxWidthInt[commonbean]/2,0,0); // copy of p2 for temporary use
+			a.m5.transform(p2copy); // m5 is M0 inverse
+		} else {
+			p2copy.set(maxWidthInt[commonbean]/2*f2); // copy of p2 for temporary use
+		}  
+		//println(counter + " p2copy transformed = "+p2copy); println("p2copy+a.p2 = " + (p2copy+a.p2));
+		Line tempLine = new Line(); 
+		if(counter==0) {tempLine.origin.set(p2copy+location(a));} else {tempLine.origin.set(p2copy+a.pVirtualArray[counter-1]);} tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+		if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);} // TEST 10/3 Extra check if start location is not already within pole (to prevent internode fully inside pole
+		for((*ftemp2:Internode, (ftemp2.species==maize)*)) {
+			if(counter == 0) { 
+				p2copy.set(maxWidthInt[commonbean]/2,0,0); // copy of p2 for temporary use
+				a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+				p2copy.set(maxWidthInt[commonbean]/2*f2); // copy of p2 for temporary use
+			} 
+			if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);}
+			de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy);  // TEST 10/3 Extra check 
+			IntersectionList isList = intersect(tempLine, volume(ftemp2));
+			//println("isList = " + isList);
+			//println("tempLine = " + tempLine);
+			if( isList.size == 0 && (Math.sqrt(p2copy.x**2+p2copy.y**2) > (ftemp2.width/2)*1.0 || p2copy.z < 0 || p2copy.z > ftemp2.length) ) { // TEST 10/3 Extra check
+				a.locIsFreeArray[counter] = true; 
+				//println("No collision, p2copy = " + p2copy + "; distance to center f = " + Math.sqrt(p2copy.x**2+p2copy.y**2) + "; f radius = " +  (ftemp2.width/2));
+			} else {// collision
+				a.locIsFreeArray[counter] = false;
+				//println("collision detected,  p2copy = " + p2copy + "; distance to center f = " + Math.sqrt(p2copy.x**2+p2copy.y**2) + "; f radius = " +  (ftemp2.width/2));
+				//if(printBoolean == true){println("collision, isList = " + isList);}
+				break; // to do does this break out of for loop? Yes.
+			}
+		}	
+		// line 2
+		if(a.locIsFreeArray[counter] == true) {
+			if(counter == 0) { 
+				p2copy.set(-maxWidthInt[commonbean]/2,0,0); // copy of p2 for temporary use
+				a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+				p2copy.set(-maxWidthInt[commonbean]/2*f2); // copy of p2 for temporary use
+			}  
+			//println(counter + " p2copy transformed = "+p2copy);
+			if(counter==0) {tempLine.origin.set(p2copy+location(a));} else {tempLine.origin.set(p2copy+a.pVirtualArray[counter-1]);} tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);} // TEST 10/3 Extra check if start location is not already within pole (to prevent internode fully inside pole
+			for((*ftemp2:Internode, (ftemp2.species==maize)*)) {
+				if(counter == 0) { 
+					p2copy.set(-maxWidthInt[commonbean]/2,0,0); // copy of p2 for temporary use
+					a.m5.transform(p2copy); // m5 is M0 inverse
+				} else {
+					p2copy.set(-maxWidthInt[commonbean]/2*f2); // copy of p2 for temporary use
+				} 
+				if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);}
+				de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy);  // TEST 10/3 Extra check 
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				//println("tempLine = " + tempLine);
+				if( isList.size == 0 && (Math.sqrt(p2copy.x**2+p2copy.y**2) > (ftemp2.width/2)*1.0 || p2copy.z < 0 || p2copy.z > ftemp2.length) ) { // TEST 10/3 Extra check
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					//if(printBoolean == true){println("collision detected, p2copy = " + p2copy);}
+					break; // to do does this break out of for loop? Yes.
+				}
+			}	
+		}	
+		// line 3
+		if(a.locIsFreeArray[counter] == true) {
+			if(counter == 0) { 
+				p2copy.set(0,maxWidthInt[commonbean]/2,0); // copy of p2 for temporary use
+				a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+				p2copy.set(maxWidthInt[commonbean]/2*f3); // copy of p2 for temporary use
+			}  
+			//println(counter + " p2copy transformed = "+p2copy);
+			if(counter==0) {tempLine.origin.set(p2copy+location(a));} else {tempLine.origin.set(p2copy+a.pVirtualArray[counter-1]);} tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);} // TEST 10/3 Extra check if start location is not already within pole (to prevent internode fully inside pole
+			for((*ftemp2:Internode, (ftemp2.species==maize)*)) {
+				if(counter == 0) { 
+					p2copy.set(0,maxWidthInt[commonbean]/2,0); // copy of p2 for temporary use
+					a.m5.transform(p2copy); // m5 is M0 inverse
+				} else {
+					p2copy.set(maxWidthInt[commonbean]/2*f3); // copy of p2 for temporary use
+				}
+				if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);}
+				de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy);  // TEST 10/3 Extra check 
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				//println("tempLine = " + tempLine);
+				if( isList.size == 0 && (Math.sqrt(p2copy.x**2+p2copy.y**2) > (ftemp2.width/2)*1.0 || p2copy.z < 0 || p2copy.z > ftemp2.length) ) { // TEST 10/3 Extra check
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					//if(printBoolean == true){println("collision detected, p2copy = " + p2copy);}
+					break; // to do does this break out of for loop? Yes.
+				}
+			}		
+		}
+		// line 4
+		if(a.locIsFreeArray[counter] == true) {
+			if(counter == 0) { 
+				p2copy.set(0,-maxWidthInt[commonbean]/2,0); // copy of p2 for temporary use
+				a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+				p2copy.set(-maxWidthInt[commonbean]/2*f3); // copy of p2 for temporary use
+			}  
+			//println(counter + " p2copy transformed = "+p2copy);
+			if(counter==0) {tempLine.origin.set(p2copy+location(a));} else {tempLine.origin.set(p2copy+a.pVirtualArray[counter-1]);} tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);} // TEST 10/3 Extra check if start location is not already within pole (to prevent internode fully inside pole
+			for((*ftemp2:Internode, (ftemp2.species==maize)*)) {
+				if(counter == 0) { 
+					p2copy.set(0,-maxWidthInt[commonbean]/2,0); // copy of p2 for temporary use
+					a.m5.transform(p2copy); // m5 is M0 inverse
+				} else {
+					p2copy.set(-maxWidthInt[commonbean]/2*f3); // copy of p2 for temporary use
+				}  
+				if(counter==0) {p2copy.set(p2copy+location(a));} else {p2copy.set(p2copy+a.pVirtualArray[counter-1]);}
+				de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy);  // TEST 10/3 Extra check 
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				//println("tempLine = " + tempLine);
+				if( isList.size == 0 && (Math.sqrt(p2copy.x**2+p2copy.y**2) > (ftemp2.width/2)*1.0 || p2copy.z < 0 || p2copy.z > ftemp2.length) ) { // TEST 10/3 Extra check
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					//if(printBoolean == true){println("collision detected, p2copy = " + p2copy);}
+					break; // to do does this break out of for loop? Yes.
+				}
+			}	
+		}
+	}
+}
+
+/*static void milpaProdGenPhytBean(Apex a)
+[
+	// Adjusted indeterminate flower production for common bean
+	a ==>
+	{
+		AvoidIntersection ai_bean_flower = new AvoidIntersection(numRaysBean); // Create new instance of AvoidIntersection for each plant (to ensure list FavorNodes is empty, and all local settings are correct)
+		ai_bean_flower.setRange(openWidthAngleBean, openHeightAngleBean, predictedLengthBean); // Set settings for test space (i.e. space that is to be explored for (un)friendly nodes)
+		ai_bean_flower.setDistance2Surface(dist2SurfBean); // Set minimal distance to surface of favorNode
+		//ai.prepareScene(); // use up-to-date scene
+		
+		// Find closest maize internode, add all subsequent organs to FavorNodes
+		//derive();
+		javax.vecmath.Vector3d fW = new javax.vecmath.Vector3d();
+		if(milpaLayout == false && beanPole == true) {
+			aiCylinderPole p_init = selectWhereMin((*p:aiCylinderPole*), distance(a,p));
+			ai_bean_flower.addFavorNode(p_init);
+			fW = direction(p_init);
+		} else {
+			aiCylinder i_init = selectWhereMin((*i:aiCylinder, (i.species == maize)*), distance(a,i));
+			for ( (* n:aiParallelogram, n2:aiParallelogramTile, n3:aiCylinder, n4: aiCylinderPole, n5:aiSphere *) )//(* n:VisibleOrgan, (n.species == maize && n.plantNumber == i_init.plantNumber && ( (n instanceof Internode) || (n instanceof Leaf ) ) ) *) ) 
+			{
+				//println(n); //test, seems to work. 
+				//TO DO if "left of maize", right-turning, if "right of maize" left turning??
+				ai_bean_flower.addFavorNode(n);
+				//ai_bean_flower.addFavorNode(n2);
+				ai_bean_flower.addFavorNode(n3);
+				ai_bean_flower.addFavorNode(n4);
+				ai_bean_flower.addFavorNode(n5);
+			}
+			fW = direction(i_init);
+		}
+		//ai.addFavorNode(i_init);
+		
+		// Helix-stuff
+		//fW = direction(i_init); 	// Head direction ('z-axis'); somehow javax.vecmath version required, otherwise direction() gives errors.
+		fW.normalize();
+		javax.vecmath.Vector3d unit = new javax.vecmath.Vector3d(1,0,0);
+		javax.vecmath.Vector3d fU = new javax.vecmath.Vector3d();
+		fU.cross(fW, unit);							// orthogonal vector to W ('y-axis')
+		fU.normalize();
+		javax.vecmath.Vector3d fV = new javax.vecmath.Vector3d();
+		fV.cross(fU, fW);							// orthogonal vector to both W and U ('x-axis')
+		fV.normalize();
+		// right-turning helix
+		//double a_helix = 4; 
+		//double b_helix = 2;
+		double dir1 = Math.cos(time/a_helix)*fV.x + Math.sin(time/a_helix)*fU.x + b_helix*fW.x;
+		double dir2 = Math.cos(time/a_helix)*fV.y + Math.sin(time/a_helix)*fU.y + b_helix*fW.y;
+		double dir3 = Math.cos(time/a_helix)*fV.z + Math.sin(time/a_helix)*fU.z + b_helix*fW.z;
+		Vector3d direction = new Vector3d(dir1,dir2,dir3);
+		direction.normalize();
+	}
+	//if (a.rank>3) (RD(direction, .5)) // directional tropism describing helix around line with same heading as closest maize internode
+	RD(direction, .5)
+	{ai_bean_flower.look(a, lengthRaysBean, strengthOfChangeBean, showRaysBean); println("look flower");}
+	i:Internode
+	[bb:BranchBase RU(30) RH(random(0,360)) aa:Apex]
+	for (1:a[nrLeaves]) (
+		[l:Leaf {l.initiate(a);}]
+		RH(360/a[nrLeaves]) 
+	)
+	[RL(45) f:Flower]
+	RH(a[phyllotaxis]+random(-10,10))
+	RL(random(-2.5,2.5)) RV(-0.6) 
+	a
+	{
+		f.initiate(a);
+		i.initiate(a);
+		bb.initiate(a);
+		aa.initiateAxillary(a);
+		a.increment();
+	};
+]*/
+
+/*static void milpaProdVegPhytBean(Apex a)
+[
+	//2. Adjusted veg. phyt. production for CLIMBING BEAN, which climbs around climbing medium
+	a ==>
+	{
+		AvoidIntersection ai_bean_veg = new AvoidIntersection(numRaysBean); // Create new instance of AvoidIntersection for each plant (to ensure list FavorNodes is empty, and all local settings are correct)
+		ai_bean_veg.setRange(openWidthAngleBean, openHeightAngleBean, predictedLengthBean); // Set settings for test space (i.e. space that is to be explored for (un)friendly nodes)
+		ai_bean_veg.setDistance2Surface(dist2SurfBean); // Set minimal distance to surface of favorNode
+		//ai.prepareScene(); // use up-to-date scene
+
+		// Find closest maize internode, add all subsequent organs to FavorNodes
+		//derive();
+		javax.vecmath.Vector3d fW = new javax.vecmath.Vector3d(1,0,0); //javax.vecmath otherwise direction() gives error
+		if(milpaLayout == false && beanPole == true) {
+			aiCylinderPole p_init = selectWhereMin((*p:aiCylinderPole*), distance(a,p));
+			ai_bean_veg.addFavorNode(p_init);
+			fW = direction(p_init);
+		} else {
+			aiCylinder i_init = selectWhereMin((*i:aiCylinder, (i.species == maize)*), distance(a,i));
+			for ( (* n:aiParallelogram, n2:aiParallelogramTile, n3:aiCylinder, n4: aiCylinderPole, n5:aiSphere *) )
+				//(* n:VisibleOrgan, (n.species == maize && n.plantNumber == i_init.plantNumber && ( (n instanceof Internode) || (n instanceof Leaf ) ) ) *) ) 
+			{
+				//TO DO if "left of maize", right-turning, if "right of maize" left turning??
+				ai_bean_veg.addFavorNode(n);
+				//ai_bean_veg.addFavorNode(n2); // tiles not favored for bean?
+				ai_bean_veg.addFavorNode(n3);
+				ai_bean_veg.addFavorNode(n4);
+				ai_bean_veg.addFavorNode(n5);
+			}
+			if(i_init != null) {fW = direction(i_init);}
+		}
+		
+		// Helix-stuff
+		fW.normalize();
+		javax.vecmath.Vector3d unit = new javax.vecmath.Vector3d(1,0,0);
+		javax.vecmath.Vector3d fU = new javax.vecmath.Vector3d();
+		fU.cross(fW, unit);							// orthogonal vector to W ('y-axis')
+		fU.normalize();
+		javax.vecmath.Vector3d fV = new javax.vecmath.Vector3d();
+		fV.cross(fU, fW);							// orthogonal vector to both W and U ('x-axis')
+		fV.normalize();
+		// right-turning helix
+		//double a_helix = 4; 
+		//double b_helix = 1;
+		double dir1 = Math.cos(time/a_helix)*fV.x + Math.sin(time/a_helix)*fU.x + b_helix*fW.x;
+		double dir2 = Math.cos(time/a_helix)*fV.y + Math.sin(time/a_helix)*fU.y + b_helix*fW.y;
+		double dir3 = Math.cos(time/a_helix)*fV.z + Math.sin(time/a_helix)*fU.z + b_helix*fW.z;
+		Vector3d direction = new Vector3d(dir1,dir2,dir3);
+		direction.normalize();
+	}
+	RD(direction, .5) // directional tropism describing helix around line with same heading as closest maize internode
+	{
+		//ai_bean_veg.printNodes(); 
+		ai_bean_veg.look(a, lengthRaysBean, strengthOfChangeBean, showRaysBean);  //println("look veg");
+	} 
+	i:Internode
+	[bb:BranchBase RU(45) RH(random(0,360)) aa:Apex]
+	for (1:a[nrLeaves]) (
+		[l:Leaf {l.initiate(a);}]
+		RH(360/a[nrLeaves]) 
+	)
+	RH(a[phyllotaxis]+random(-10,10))
+	RL(random(-2.5,2.5)) RV(-0.6)
+	a
+	{	
+		i.initiate(a);
+		bb.initiate(a);
+		aa.initiateAxillary(a);
+		a.increment();
+	};
+]*/
+
+
+/*a.v1.set(direction(a)); a.m7.transform(a.v1); a.v1.normalize(); // TO DO TEST
+		a.p2.set(location(a)+a.v1*a.L/nrSubInternodes);
+		for(int i = 0; i<counter; i++) {
+			a.m6.rotX(Math.toRadians(a.alpha_helix));
+			a.m8.rotX(Math.toRadians(-a.alpha_helix)); 
+			if(i == counter-1) { a.m4.rotY(Math.toRadians(a.angle)); } else { a.m4.rotY(Math.toRadians(a.angle2Array[i+1])); } 
+			a.m3.transform(a.v1); // TO DO not sure if we need these at all? Or some different transformation matrix?
+			a.m6.transform(a.v1);
+			a.m4.transform(a.v1);
+			a.m8.transform(a.v1);
+			a.m5.transform(a.v1); //?
+			a.v1.normalize();
+			a.p2.set(a.p2+a.v1*a.L/nrSubInternodes);
+		}*/
+		
+		// new test TO DO check
+		// Assemble x_i and x_i^-1
+		/*if(counter != nrSubInternodes) {
+			xMatrixArray[counter+1].set();
+		}
+		Matrix3d mtemp = new Matrix3d(); mtemp.set(a.m3);
+		if(counter != 0) {
+			for(int i = 1; i<=counter; i++) { // Assembling matrix M_counter for counter > 0
+				mtemp.mul(mtemp, a.xMatrixArray[i]);	
+			}
+			for(int i = counter-1; i>=1; i--) {
+				mtemp.mul(mtemp, a.xInverseMatrixArray[i]);	
+			}
+			a.MMatrixArray[counter].set(mtemp); // M_counter
+			a.MInverseMatrixArray[counter].invert(mtemp); // M_counter inverse
+			
+			Matrix3d mtemp2 = new Matrix3d(); mtemp2.set(a.MMatrixArray[counter]); // Assembling product M_counter-1 * ... * M_1
+			for(int i = counter-1; i>=1; i--) { 
+				mtemp2.mul(mtemp2, a.MMatrixArray[i]);	
+			}
+		}*/
+		
+/*static void findClosestPole(Apex a) 
+{
+	aiCylinderPole ftemp = a.fPole;	//selectWhereMin((*ff:aiCylinderPole*),distance(a,ff));
+	a.pmin = 100;
+	for((*ff:aiCylinderPole*)) { // find closest Pole 
+		// TO DO update to include other objects than pole?
+		//println("ff = "+ff);
+		a.p1 = location(a);
+		de.grogra.vecmath.Math2.invTransformPoint(transformation(ff), a.p1);	
+		//println("p1 = "+p1);
+		if(Math.sqrt(a.p1.x**2+a.p1.y**2) < a.pmin && a.p1.z < ff.len && a.p1.z >= 0){ // Pole should start below ground... 
+			a.pmin = Math.sqrt(a.p1.x**2+a.p1.y**2);
+			a.fPole = ff;	
+		}
+	}
+	if( a.fPole != ftemp && a.pmin < .2 && a.pmin > a.fPole.width/2 ) { a.setInitHeadingArray[0] = true; } //calcInitialHeadingTransformations(a, 0);
+	if( a.setInitHeadingArray[0] == false ){ 
+		// Determine if collision occurs under current angle
+		checkIfCollision(a, 0);
+	}	
+	//println("Pmin = "+pmin);
+	//println("fPole = "+fPole);
+}*/
+
+/*
+static void checkIfCollision(Apex a, int counter)
+{
+	if( counter == 0 ) {
+		a.pVirtualArray[0].set(location(a)); 
+		a.dirVirtualArray[0].set(direction(a));
+	}
+	
+	//println("setInitHeadingArray = " + a.setInitHeadingArray[counter]);
+	//println("pVirtualArray = " + a.pVirtualArray[counter]);
+	//println("dirVirtualArray = " + a.dirVirtualArray[counter]);
+	println("checkIfCollision called");
+	if (a.setInitHeadingArray[counter] == true) {
+		// Calculate global coordinates of next point for collision detection (see also above for more info) 
+		transformation(a.fPole).toMatrix4d().get(a.m1); // global to local rotation transformation for f
+		a.m2.rotZ(Math.toRadians(a.initangle+90-a.angle/2.0)); 
+		if(counter == 0) { a.m4.rotY(Math.toRadians(a.angle)); } else { a.m4.rotY(Math.toRadians(a.angle2Array[counter])); }
+		a.m6.rotX(Math.toRadians(90)); a.m8.rotX(Math.toRadians(-a.alpha_helix)); 
+		transformation(a).toMatrix4d().get(a.m3); a.m5.invert(a.m3); 
+		a.m7.mul(a.m1,a.m2); a.m7.mul(a.m7,a.m6); a.m7.mul(a.m7,a.m4); a.m8.mul(a.m8,a.m5); a.m7.mul(a.m7,a.m8); // m7 = m1*m2*m6*m4*m8*m5
+		
+		if(counter == 0) { 
+			//transformation(a.fPole).toMatrix4d().getRotationScale(a.MMatrixArray[0]); // set M_0	
+			transformation(a).toMatrix4d().getRotationScale(a.MMatrixArray[0]); // set M_0	// TEST 16/2 according to thesis, this should always be m3...
+			a.MProductMatrixArray[0].set(a.MMatrixArray[0]);
+			a.v1.set(a.dirVirtualArray[0]); a.m7.transform(a.v1); a.v1.normalize(); // v_0; direction pointing towards p1
+			a.p2.set(a.pVirtualArray[0]+a.v1*a.L/nrSubInternodes); // p1; p0 + perturbation of length L
+			//a.pVirtualArray[0].set(a.p2); 
+			//a.dirVirtualArray[0].set(a.v1);
+		} else {
+			Matrix3d mtemp = new Matrix3d(); mtemp.set(a.MMatrixArray[0]); // mtemp = M_0
+			for(int i = 1; i<counter; i++) { // Assembling product M_counter-1 * ... * M_0
+				mtemp.mul(a.MMatrixArray[i],mtemp);	
+			}
+
+			// Assembling M_counter 
+			//Matrix3d mtemp2 = new Matrix3d(); mtemp2.set(mtemp); 
+			Matrix3d mtempinverse = new Matrix3d(); mtempinverse.invert(mtemp);
+			mtemp.mul(a.m1,a.m2); mtemp.mul(mtemp,a.m6); mtemp.mul(mtemp,a.m4); mtemp.mul(mtemp,a.m8); mtemp.mul(mtemp,mtempinverse);
+			a.MMatrixArray[counter].set(mtemp); // M_counter
+			a.MProductMatrixArray[counter].mul(mtemp,a.MProductMatrixArray[counter-1]); // product M_counter * ... * M_0
+			
+			a.v1.set(a.dirVirtualArray[0]); 
+			mtemp.invert(a.MMatrixArray[0]); mtemp.mul(a.MProductMatrixArray[counter],mtemp); 
+			mtemp.transform(a.v1); a.v1.normalize(); // v_n
+			a.p2.set(a.pVirtualArray[counter-1]+a.v1*a.L/nrSubInternodes); // pn+1 
+		}
+		
+		// Determine if collision occurs
+		Point3d p2copy = new Point3d();
+		
+		// line 1
+		p2copy.set(0.005/2,0,0); // copy of p2 for temporary use
+		if(counter == 0) { 
+					a.m5.transform(p2copy); // m5 is M0 inverse
+		} else {
+						Matrix3d mtemp3 = new Matrix3d(); 
+						mtemp3.set(a.MProductMatrixArray[counter]); // alternative M_n-1*..*M_0
+						mtemp3.mul(mtemp3,a.m3); // M_n*..*M_0*m_3
+						mtemp3.invert(mtemp3);
+						mtemp3.transform(p2copy);
+						//println(mtemp3);
+		}  // transform point (R,0,0) from local p2 coordinates to global coords
+		//println(counter + " p2copy transformed = "+p2copy); println("p2copy+a.p2 = " + (p2copy+a.p2));
+		Line tempLine = new Line();  // TEST 10/2 using Line and intersectionlist
+		tempLine.origin.set(p2copy+a.p2); tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+		for((*ftemp2:aiCylinderPole*)) {
+			// TEST 10/2 using Line and intersectionlist
+			IntersectionList isList = intersect(tempLine, volume(ftemp2));
+			//println("isList = " + isList);
+			if( isList.size == 0 ) {
+				a.locIsFreeArray[counter] = true; 
+			} else {// collision
+				a.locIsFreeArray[counter] = false;
+				println("collision detected, p2copy = " + p2copy);
+				break; // to do does this break out of for loop? Yes.
+			}
+		}	
+		 
+		// line 2
+		if(a.locIsFreeArray[counter] == true) {
+			p2copy.set(-0.005/2,0,0); // copy of p2 for temporary use
+			if(counter == 0) { 
+					a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+						Matrix3d mtemp3 = new Matrix3d(); 
+						mtemp3.set(a.MProductMatrixArray[counter]); // alternative M_n-1*..*M_0
+						mtemp3.mul(mtemp3,a.m3); // M_n*..*M_0*m_3
+						mtemp3.invert(mtemp3);
+						mtemp3.transform(p2copy);
+			}  // transform point (R,0,0) from local p2 coordinates to global coords
+			//Line tempLine = new Line();  // TEST 10/2 using Line and intersectionlist
+			tempLine.origin.set(p2copy+a.p2); tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			for((*ftemp2:aiCylinderPole*)) {
+				// TEST 10/2 using Line and intersectionlist
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				if( isList.size == 0 ) {
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					println("collision detected, p2copy = " + p2copy);
+					break; // to do does this break out of for loop? Yes.
+				}
+			}	
+		}
+			
+		// line 3
+		if(a.locIsFreeArray[counter] == true) {
+			p2copy.set(0,0.005/2,0); // copy of p2 for temporary use
+			if(counter == 0) { 
+					a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+						Matrix3d mtemp3 = new Matrix3d(); 
+						mtemp3.set(a.MProductMatrixArray[counter]); // alternative M_n-1*..*M_0
+						mtemp3.mul(mtemp3,a.m3); // M_n*..*M_0*m_3
+						mtemp3.invert(mtemp3);
+						mtemp3.transform(p2copy);
+			}  // transform point (R,0,0) from local p2 coordinates to global coords
+			//Line tempLine = new Line();  // TEST 10/2 using Line and intersectionlist
+			tempLine.origin.set(p2copy+a.p2); tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			for((*ftemp2:aiCylinderPole*)) {
+				// TEST 10/2 using Line and intersectionlist
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				if( isList.size == 0 ) {
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					println("collision detected, p2copy = " + p2copy);
+					break; // to do does this break out of for loop? Yes.
+				}
+			}		
+		}
+		
+		// line 4
+		if(a.locIsFreeArray[counter] == true) {
+			p2copy.set(0,-0.005/2,0); // copy of p2 for temporary use
+			if(counter == 0) { 
+					a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+						Matrix3d mtemp3 = new Matrix3d(); 
+						mtemp3.set(a.MProductMatrixArray[counter]); // alternative M_n-1*..*M_0
+						mtemp3.mul(mtemp3,a.m3); // M_n*..*M_0*m_3
+						mtemp3.invert(mtemp3);
+						mtemp3.transform(p2copy);
+			}  // transform point (R,0,0) from local p2 coordinates to global coords
+			//Line tempLine = new Line();  // TEST 10/2 using Line and intersectionlist
+			tempLine.origin.set(p2copy+a.p2); tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			for((*ftemp2:aiCylinderPole*)) {
+				// TEST 10/2 using Line and intersectionlist
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				if( isList.size == 0 ) {
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					println("collision detected, p2copy = " + p2copy);
+					break; // to do does this break out of for loop? Yes.
+				}
+			}	
+		}
+			// transform copy of p2 to coordinate system ftemp
+		for( (*ftemp2:aiCylinderPole*) ) {
+			p2copy.set(a.p2); // copy of p2 for temporary use
+			de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy); 
+			if(Math.sqrt(p2copy.x**2+p2copy.y**2)> (ftemp2.width/2)*1.1 || p2copy.z < 0 || p2copy.z > ftemp2.len) {// if no collision detected
+				a.locIsFreeArray[counter] = true; 
+			} else {// collision
+				a.locIsFreeArray[counter] = false;
+				println("collision detected, p2copy = " + p2copy);
+				break; // to do does this break out of for loop? Yes.
+			}
+		}
+	} else { // setInitHeading == false
+		// Calculate global coordinates of next point for collision detection
+		if(counter == 0) { a.m4.rotY(Math.toRadians(a.angle)); } else { a.m4.rotY(Math.toRadians(a.angle2Array[counter])); } 
+		a.m6.rotX(Math.toRadians(a.alpha_helix)); // Interpret as local rotation around left-axis
+		a.m8.rotX(Math.toRadians(-a.alpha_helix)); // Interpret as local rotation around left-axis
+		transformation(a).toMatrix4d().get(a.m3); // global to local rotation transformation for a
+		a.m5.invert(a.m3); // local to global transformation for a
+		a.m6.mul(a.m3,a.m6); a.m7.mul(a.m6,a.m4); a.m8.mul(a.m8,a.m5); a.m7.mul(a.m7,a.m8); // m7 = m3*m6*m4*m8*m5 (* = matrix product)
+		
+		if(counter == 0) { 
+			transformation(a).toMatrix4d().getRotationScale(a.MMatrixArray[0]); // TEST was a.fPole... set M_0 ?? shouldnt this be a.m3? 16/2 according to thesis, this should always be m3
+			a.MProductMatrixArray[0].set(a.MMatrixArray[0]);
+			a.v1.set(a.dirVirtualArray[0]); a.m7.transform(a.v1); a.v1.normalize(); // v_n
+			//
+			a.p2.set(a.pVirtualArray[0]+a.v1*a.L/nrSubInternodes); // pn
+		}
+		if(counter != 0) {
+			Matrix3d mtemp = new Matrix3d(); mtemp.set(a.MMatrixArray[0]); // mtemp = M_0
+			for(int i = 1; i<counter; i++) { // Assembling product M_counter-1 * ... * M_0
+				mtemp.mul(a.MMatrixArray[i],mtemp);	
+			}
+			//if(counter == 1) {a.MProductMatrixArray[counter-1].set(mtemp);} // product M_counter-1 * ... * M_0
+
+			// Assembling M_counter 
+			//Matrix3d mtemp2 = new Matrix3d(); mtemp2.set(mtemp); //
+			Matrix3d mtempinverse = new Matrix3d(); mtempinverse.invert(mtemp);
+			mtemp.mul(mtemp,a.m6); mtemp.mul(mtemp,a.m4); mtemp.mul(mtemp,a.m8); mtemp.mul(mtemp,mtempinverse);
+			a.MMatrixArray[counter].set(mtemp); // M_counter
+			a.MProductMatrixArray[counter].mul(mtemp,a.MProductMatrixArray[counter-1]); // product M_counter * ... * M_0
+			
+			a.v1.set(a.dirVirtualArray[0]); 
+			mtemp.invert(a.MMatrixArray[0]); mtemp.mul(a.MProductMatrixArray[counter],mtemp); 
+			mtemp.transform(a.v1); a.v1.normalize(); // v_n
+			a.p2.set(a.pVirtualArray[counter-1]+a.v1*a.L/nrSubInternodes); // 
+		}
+		
+		// Determine if collision occurs
+		Point3d p2copy = new Point3d();
+		
+		// line 1
+		p2copy.set(0.005/2,0,0); // copy of p2 for temporary use
+		if(counter == 0) { 
+					a.m5.transform(p2copy); // m5 is M0 inverse
+		} else {
+						Matrix3d mtemp3 = new Matrix3d(); 
+						mtemp3.set(a.MProductMatrixArray[counter]); // alternative M_n-1*..*M_0
+						mtemp3.mul(mtemp3,a.m3); // M_n*..*M_0*m_3
+						mtemp3.invert(mtemp3);
+						mtemp3.transform(p2copy);
+						//println(mtemp3);
+		}  // transform point (R,0,0) from local p2 coordinates to global coords
+		//println(counter + " p2copy transformed = "+p2copy); println("p2copy+a.p2 = " + (p2copy+a.p2));
+		Line tempLine = new Line();  // TEST 10/2 using Line and intersectionlist
+		tempLine.origin.set(p2copy+a.p2); tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+		for((*ftemp2:aiCylinderPole*)) {
+			// TEST 10/2 using Line and intersectionlist
+			IntersectionList isList = intersect(tempLine, volume(ftemp2));
+			//println("isList = " + isList);
+			if( isList.size == 0 ) {
+				a.locIsFreeArray[counter] = true; 
+			} else {// collision
+				a.locIsFreeArray[counter] = false;
+				println("collision detected, p2copy = " + p2copy);
+				break; // to do does this break out of for loop? Yes.
+			}
+		}	
+		 
+		// line 2
+		if(a.locIsFreeArray[counter] == true) {
+			p2copy.set(-0.005/2,0,0); // copy of p2 for temporary use
+			if(counter == 0) { 
+					a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+						Matrix3d mtemp3 = new Matrix3d(); 
+						mtemp3.set(a.MProductMatrixArray[counter]); // alternative M_n-1*..*M_0
+						mtemp3.mul(mtemp3,a.m3); // M_n*..*M_0*m_3
+						mtemp3.invert(mtemp3);
+						mtemp3.transform(p2copy);
+			}  // transform point (R,0,0) from local p2 coordinates to global coords
+			//Line tempLine = new Line();  // TEST 10/2 using Line and intersectionlist
+			tempLine.origin.set(p2copy+a.p2); tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			for((*ftemp2:aiCylinderPole*)) {
+				// TEST 10/2 using Line and intersectionlist
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				if( isList.size == 0 ) {
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					println("collision detected, p2copy = " + p2copy);
+					break; // to do does this break out of for loop? Yes.
+				}
+			}	
+		}
+			
+		// line 3
+		if(a.locIsFreeArray[counter] == true) {
+			p2copy.set(0,0.005/2,0); // copy of p2 for temporary use
+			if(counter == 0) { 
+					a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+						Matrix3d mtemp3 = new Matrix3d(); 
+						mtemp3.set(a.MProductMatrixArray[counter]); // alternative M_n-1*..*M_0
+						mtemp3.mul(mtemp3,a.m3); // M_n*..*M_0*m_3
+						mtemp3.invert(mtemp3);
+						mtemp3.transform(p2copy);
+			}  // transform point (R,0,0) from local p2 coordinates to global coords
+			//Line tempLine = new Line();  // TEST 10/2 using Line and intersectionlist
+			tempLine.origin.set(p2copy+a.p2); tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			for((*ftemp2:aiCylinderPole*)) {
+				// TEST 10/2 using Line and intersectionlist
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				if( isList.size == 0 ) {
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					println("collision detected, p2copy = " + p2copy);
+					break; // to do does this break out of for loop? Yes.
+				}
+			}		
+		}
+		
+		// line 4
+		if(a.locIsFreeArray[counter] == true) {
+			p2copy.set(0,-0.005/2,0); // copy of p2 for temporary use
+			if(counter == 0) { 
+					a.m5.transform(p2copy); // m5 is M0 inverse
+			} else {
+						Matrix3d mtemp3 = new Matrix3d(); 
+						mtemp3.set(a.MProductMatrixArray[counter]); // alternative M_n-1*..*M_0
+						mtemp3.mul(mtemp3,a.m3); // M_n*..*M_0*m_3
+						mtemp3.invert(mtemp3);
+						mtemp3.transform(p2copy);
+			}  // transform point (R,0,0) from local p2 coordinates to global coords
+			//Line tempLine = new Line();  // TEST 10/2 using Line and intersectionlist
+			tempLine.origin.set(p2copy+a.p2); tempLine.direction.set(a.v1); tempLine.start = 0d; tempLine.end = a.L*1.0/nrSubInternodes; // origin, direction, start, end
+			for((*ftemp2:aiCylinderPole*)) {
+				// TEST 10/2 using Line and intersectionlist
+				IntersectionList isList = intersect(tempLine, volume(ftemp2));
+				//println("isList = " + isList);
+				if( isList.size == 0 ) {
+					a.locIsFreeArray[counter] = true; 
+				} else {// collision
+					a.locIsFreeArray[counter] = false;
+					println("collision detected, p2copy = " + p2copy);
+					break; // to do does this break out of for loop? Yes.
+				}
+			}	
+		}
+		
+		
+		// transform copy of p2 to coordinate system ftemp
+		for( (*ftemp2:aiCylinderPole*) ) {
+			p2copy.set(a.p2); // copy of p2 for temporary use
+			de.grogra.vecmath.Math2.invTransformPoint(transformation(ftemp2), p2copy); 
+			if(Math.sqrt(p2copy.x**2+p2copy.y**2)> (ftemp2.width/2)*1.1 || p2copy.z < 0 || p2copy.z > ftemp2.len) {// if no collision detected
+				a.locIsFreeArray[counter] = true; 
+			} else {// collision
+				a.locIsFreeArray[counter] = false;
+				println("collision detected, p2copy = " + p2copy);
+				break; // to do does this break out of for loop? Yes.
+			}
+		}
+	}
+	
+	// set location and direction of current endpoint to get correct starting position for next pass
+	//if( counter < nrSubInternodes-1 && counter > 0){ // TO DO do we need a.locIsFreeArray[counter] == true &&? does it add anything?
+		// TEST 16/2 do we need any of the conditions? 
+	a.pVirtualArray[counter].set(a.p2);
+	a.dirVirtualArray[counter].set(a.v1);
+		//println("a.dirVirtualArray["+counter+"] = " + a.dirVirtualArray[counter]);
+		//if(counter!=0) {println(" a.pVirtualArray["+ (counter-1) +"] " + a.pVirtualArray[counter-1]);}
+		//println(" a.pVirtualArray["+counter+"] " + a.pVirtualArray[counter]);
+	//}
+}*/

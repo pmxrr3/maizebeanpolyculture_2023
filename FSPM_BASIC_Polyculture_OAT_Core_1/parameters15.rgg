@@ -1,0 +1,97 @@
+import static parameters.*;
+
+/* squash */
+
+{
+	// field parameters
+	nrRows[squash] = 2;                  // number of rows
+	nrPlants[squash] = 2;                // number of plants in a row
+	rowDistance[squash] = 0.5;          // distance between rows
+	plantDistance[squash] = 0.5;        // distance between plants in a row
+	delay[squash] = 0;                   // germination delay after start of simulation (in days, to represent late sowing)
+	harvest[squash] = 77;               // duration, i.e. harvest/removal time after emergence (in days)
+	hexa[squash] = false;                // true: hexagonal layout, rectangular otherwise
+	offspotIntraRow[squash] = 0.05;			// fraction of plant distance the plant seed is off-spot
+	offspotInterRow[squash] = 0.05;			// fraction of row distance the plant seed is off-spot
+	                                    
+	// plant parameters                 
+	determinate[squash] = false;			// TRUE = determinate, FALSE = indeterminate
+	plastochron[squash] = 70;            // time between creation of two phytomers (dd)
+	phyllochron[squash] = 70;			// time between appearance of two leaves (dd)
+	finalPhytNum[squash] = 20;        // final number of main stem vegetative phytomers
+	nrShortInternodes[squash] = 0;       // number of bottom internodes that should not elongate 
+                                        
+	wmaxRoot[squash] = 20000;            // maximum root system biomass (mg)
+	wmaxFlower[squash] = 100000;         // maximum flower/fruit biomass
+	wmaxInt[squash] = 2000;              // maximum internode biomass
+	wmaxLeaf[squash] = 4000;              // maximum leaf biomass
+	teRoot[squash] = 1800;               // root growth duration
+	teFlower[squash] = 500;              // flower/fruit growth duration
+	teInt[squash] = 500;                 // internode growth duration
+	teLeaf[squash] = 500;                // leaf growth duration
+
+	maxWidthInt[squash] = 0.02;			// maxium internode width
+	specificInternodeLength[squash] = 0.1;  // internode ratio length / biomass (mm/mg)
+
+	amax[squash] = 25;                   // max photosynthesis rate
+	eff[squash] = 0.06;                  // initial light use efficiency (initial slope of light response curve)
+	C4[squash] = false;					// false: C3, true: C4 (parameter only valid when FvCB is true)
+	nitro[squash] = 2.5;					// nitrogen content of leaves at top of canopy (g/m2 of leaf)
+	
+	LMA[squash] = 4;                     // leaf mass per unit area (mg / cm2)
+	leafLife[squash] = 5;                // life span of a leaf since appearance (expressed as X times its growth duration (te))
+	lwRatio[squash] = 1;                 // ratio between leaf blade length and width
+	maxWidth[squash] = 0.8;             // location on the leaf where width is maximal (fraction of length)
+	shapeCoeff[squash] = .1;            // leaf shape coefficient (0 = rectangular, high value = pinched)
+	leafCurve[squash] = 10;              // leaf curvature - angle between bottom and top of leaf blade (0 = flat)
+
+	rankLower[squash] = 1;				// final phtyomer that has properties of lower phytomers (e.g. nr of leaflets, leaf angle, etc) 
+
+	leafAngleLower[squash] = 90;		// insertion angle of lower leaves (90 = horizontal)
+	leafAngleUpper[squash] = 90;		// insertion angle of upper leaves (90 = horizontal)
+
+	nrLeafletsLower[squash] = 1;	//TO DO			 // number of leaflets per leaf for the lower phytomers
+	nrLeafletsUpper[squash] = 1;				 // number of leaflets per leaf for the upper phytomers
+	petioleFraction[squash] = 0.1;		 // fraction of biomass partitioned to the petiole
+	petioluleFraction[squash] = 0;	 // fraction of biomass partitioned to the petiolule
+	specificPetioleLength[squash] = 0.1; // specific petiole length (mm/mg)
+	specificPetioluleLength[squash] = 0;// specific petiolule length (mm/mg)
+	
+	nrLeavesLower[squash] = 2;			// number of leaves per phytomer for the lower phytomers
+	nrLeavesUpper[squash] = 1;			// number of leaves per phytomer for the upper phytomers
+	phyllotaxisLower[squash] = 180;           // angle between consecutive leaves along a stem for the lower phytomers
+	phyllotaxisUpper[squash] = 0;           // angle between consecutive leaves along a stem for the upper phytomers
+	
+	varDelay[squash] = 0;                // max variation in germination delay (in days, 0 = simultaneous germination)
+	seedMass[squash] = 40;             // seed endosperm mass in mg
+	
+	SASextend[squash] = true;				// toggle internode SAS extention response
+	
+	branching[squash] = false;			 // toggle branching
+	tillersOnly[squash] = false;		// true: bud break only if parent internode has length 0 (= tillering)
+	dominance[squash] = 0;				// minimum dominance, so maximal branching phytomer distance, at infinitely large source/sink ratio (no neighbours)
+	srAbortThresh[squash] = 0.2;			// threshold sink/source ratio for branch abortion
+	
+	tb[squash] = 0;						// base temperature for thermal time calculation
+                  
+	EL[squash] = 51; 					// Root elongation rate mm mm-1 day-1 
+	Dinit[squash] = 0.0011;				// Initial root Diameter in m (Pages 2013 - pea)
+	RTD[squash]	= 200;					// Root tissue density (g/cm3) (Pages 2013 - generic)
+	MP[squash] = 1;						// Maximum number of root primordia (Pages 2013 - pea)
+	ER[squash] = 0.056;					// Emergence rate of root primordia per day = 0.968 at 25 degrees which is 0.056 per dregreeday. (Pages 2013 - pea)
+	IBD[squash] = 0.0078;				// Inter Branch Distance (Pages 2013 - pea)
+	IBDmax[squash] = 0.039; 			// Inter branch distance of the highest root order (Pages 2013 - pea)
+	RZone[squash] = 0.01;				// No lateral zone in m 
+	RDM0[squash] = 0.5;					// Ratio Daughter Mother Diameter 
+	RDM1[squash] = 0.375;				// Ratio Daughter Mother Diameter 
+	sdD[squash] = 0.09;					// Standard deviation diameter for RDM (Pages 2013 - pea)
+	angleAVG[squash] = 60;				// average insertion angle of lateral roots
+	angleVAR[squash] = 20;				// variation in the insertion angle of lateral roots
+	MCP[squash]	= 5;					//random root movement based on mechanical constraints; radial degrees/m
+	MaxRootOrder[squash] = 1;
+	fineRootD[squash] = 0.1;			// Diameter in m/m
+	fineRootDensity[squash]	= 32;		// m fine roots/m coarse root	
+	RLratio[squash]	= 1;	 			// Root/Leaf ratio
+	fMyc[squash] = 0;					// +MF 0.00005
+	Groot[squash] = 0.01;				// Base rate of Gravitropism 
+}

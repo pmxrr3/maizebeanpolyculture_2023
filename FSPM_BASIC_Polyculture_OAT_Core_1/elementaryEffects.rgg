@@ -1,0 +1,1526 @@
+		/**
+* Name: Elementary effects for general models
+* Version: 1.0 (Oct. 2021)
+* Author: R.J.L. Rutjens (rik.rutjens@nottingham.ac.uk)
+* Description: 
+* 	This code accompanies the author's PhD thesis and the paper **TO DO**. 
+*	It is to be used together with the functional-structural plant model FSPM_BASIC. While this is a collection of .rgg files (which extends Java),
+*	the code is 99% Java-compatible (except for the links with the RGG-platform GroIMP), and one
+*	can just copy/paste parts of the code to their own implementation.
+*	Elementary Effects Sensitivity Analyis (https://en.wikipedia.org/wiki/Elementary_effects_method, 
+*	see Morris and Campolongo for seminal papers) is a way to identify (non-)influential inputs 
+*	and rank input factors in order of importance/sensitivity. 
+*	The program implements the following methods:
+*		1. EOT (enhanced version of OT, as employed by Khare et al. [23]) 
+*			--> elementaryEffectsTrajectoriesEOT()
+*		2. ‘Standard’ Sobol radial (for double type inputs: generate all points by Sobol QR; for integer/Boolean
+*		   	type inputs: generate base value by Sobol QR, transform to nearest attainable value, then step by delta_i)
+*			--> elementaryEffectsTrajectoriesStandardSobRad()
+*		3. ‘Standard’ Sobol winding (generate base points A and perturbation matrix B by Sobol QR, 
+*		   	then use winding stairs trajectories instead of radial design
+*			--> elementaryEffectsTrajectoriesStandardSobWind()
+*		4. ‘Pinned’ Sobol radial (for all inputs: generate base value by Sobol QR, 
+*			transform to nearest attainable value, then step by delta_i)
+*			--> elementaryEffectsTrajectoriesPinnedSobRad()
+*		5. ‘Standard’ Rd radial (same as ‘Standard’ Sobol radial, but with Rd QR sequence)
+*			--> elementaryEffectsTrajectoriesStandardRdRad()
+*		6. ‘Pinned’ Rd radial (same as ‘Pinned’ Sobol radial, but with Rd QR sequence)
+*			--> elementaryEffectsTrajectoriesPinnedRdRad()
+*		7. `Standard' Rd winding (same as `Standard' Sobol winding, but with Rd QR sequence)
+*			--> elementaryEffectsTrajectoriesStandardRdWind()
+* 	5.`Standard' Rd radial seems to be the overall preferred method (see paper).
+*	Furthermore, two dimensionless normalised measures are implemented, one based on the median of 
+* 	absolute effects (S_chi), the other on the mean of absolute effects (S_mu*). The former is the preferred choice.
+*	The implementation is applicable to:
+*		1. Dimensional models;
+*		2. Non-unit parameter intervals;
+*		3. Various input types (double, integer, Boolean).
+*
+* 	The following steps should be taken before running the analysis:
+* 		1. Set boolean carryOutElemEffAnalysis to true;
+*		2. Download external libraby Apache Commons math (see below for details);
+*		2a. Set input/output filenames;
+*		3. Set number of trajectories r (typically ~10-50);
+*				Note: total #simulations = r*(#parameters+1).
+*		3a. Set importance threshold h
+*		4. Choose sampling approach. 
+*				If EOT: set number of initial trajectories M>>r (typically ~500-1000);
+*				If QR-method: set QRshift, i.e. shift of B matrix w.r.t. A matrix (default = 4).
+*		5. Insert parameter names, lower and upper bounds, # levels (p_i), type, etc. into e.g. Input/ParametersTestModel.txt; 
+*				Note: for boolean parameters, max = 1, min = 0, p=2. For double/integer parameters, typically p=4 is taken, but this depends on the model. 
+*				For integer-valued parameters, you must choose p_i, min_i and max_i such that (max_i-min_i) = n*(p_i-1), where n is an integer.
+*				Tip: the free software Notepad++ allows some handy manipulations, such as block selection (use Alt-key).
+*		6. If applicable: value of Delta is determined by column cdelta in said .txt-file, by Delta_i = cdelta_i/(p_i-1)); Note that Morris' optimal value Delta_i = p_i/(2*(p_i-1))) for p_i even;
+*		7. Fill String[] outputs with desired outputs (names do not need to match parameternames; matching is done manually for now);
+* 		8. Manually adapt the list of parameters in elementaryEffectsSetNextParameterPoint() to match the parameters in ParametersTestModel.csv;
+*				Note: the sequence matters. Also, the names must be the exact parameter names. If needed, convert parameter from double to int.
+*		9. In elementaryEffectsCalcEffects(), set variables "index" and "skiprows";
+*		10. If applicable: set all free parameters that are not included in the analysis;
+*		11. Hit Run run and wait.
+*		12. Outputs: i) Model outputs; ii) Effects (unscaled); iii) Measures (unscaled); iv) Measures (scaled); v) Trajectories.
+*			Measures (scaled) is the most important, containing the parameter rankings and the dimensionless normalised measures S_chi and S_mu*.
+*
+* Remarks:
+*	- Caution is advised when saving either text or code files in a cloud-based location (e.g. OneDrive, *	   Dropbox); automatic syncing might cause errors ("document x has been changed") which terminates the *	 run. Hence it is advisable to switch off syncing whilst running simulations.
+*	- A number of decrepated methods can be found at the bottom of this file. 
+*	  Do not use these; they are only included for the sake of completeness and for research purposes.
+*	- The by times out of date Java syntax (e.g. typecasting) is a consequence of the GroIMP platform it runs on. 
+*	  Feel free to modernise if you do not intend to use GroIMP.
+*	- Feel free to use, adapt and distribute this code or parts thereof, but please consider including
+*	  a reference to our paper in your implementation or publication.
+**/
+
+
+import java.io.*;
+
+import static parameters.*;
+// External library Apache Commons math for matrix operations and combinations/permutations; required for EE sensitivity analysis. 
+// Library is freely available online. Put .jar-file in folder named "ext", 
+// and place folder in GroIMP main folder (i.e. C:\Program Files (x86)\GroIMP-1.5)
+import org.apache.commons.math3.util.CombinatoricsUtils;
+import org.apache.commons.math3.linear.*;
+import org.apache.commons.math3.random.*;
+import org.apache.commons.math3.stat.descriptive.rank.Median;
+import java.util.*;
+import java.lang.Math;
+import java.util.concurrent.ThreadLocalRandom;
+import static java.util.Arrays.asList;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+static boolean carryOutElemEffAnalysis = true; 				// If True, do EE analyis, if false, do nothing in main.run()
+
+public class ElementaryEffects implements Serializable {
+	private static final long serialVersionUID = -5280969551429641622L; // GroIMP threw SASException error; this fixes it, but not sure why. Has something to do with serializable (which was also added because of a vague GroIMP error). Someone with decent Java-knowledge could take a look at this.
+	// Initialization of objects used by multiple methods.
+	private List parameterNames = new ArrayList();		// Arraylist of strings containing parameter names
+	private List min = new ArrayList(); 			// Array with parameter lower bounds 
+	private List max = new ArrayList(); 			// Array with parameter lower bounds 
+	static double[] parameterValues;				// Array with parameter values to be used for next simulation run
+	String[] outputs = {"LAI", "BiomAbove", "Yield"};		// Array of desired outputs; manually note here and make sure to save correct output values.
+	int outputLength = outputs.length;
+	private int k;									// Number of inputs/factors/parameters
+	private List ptemp = new ArrayList(); 
+	private List typetemp = new ArrayList(); 
+	private List cdeltatemp = new ArrayList(); 
+	private int[] p;					// Number of possible values (levels) parameters can take; parameter-dependent; take each entry even number.
+	private int[] type;					// input type: 0 = double; 1= int; 2 = boolean
+	private int[] cdelta;					// delta[i] = cdelta[i]/(p[i]-1). Optimal value (Morris) cdelta[i]=p[i]/2 when p[i] is even
+	private int r = 20; //(int) Math.pow(2,10);		// Number of trajectories (of length k+1) 
+	private int M = 1000;				// Number of initial trajectories for EOT (typically ~500-1000)
+	private int QRshift = 4;		// shift for B-matrix in QR sequences.
+	private int burninAmount = 0; 	// Skip first x elements of QR sequence
+	private int[] h = {30}; 			// Thresholds for (un)important parameter identification; percentage (0-100) of contribution to sum of normalized effects.
+	private RealMatrix Delta;		// Step size (if trajectories), dependent on parameter. Delta_i = p_i/[2(p_i-1)] is optimal choice. Delta must be column vector.
+	private RealMatrix Y;			//output.length];			// Matrix containing simulation outputs for every run
+	private RealMatrix X;			// (Not in use atm) Points in parameter space to be used for analysis
+	RealMatrix EE;			// Matrix with all elementary effects (normal Morris method)
+	private RealMatrix B_total;		// Matrix with all M trajectories 
+	private RealMatrix B_totalNew;  // Matrix with all numDiff unique trajectories 
+	static RealMatrix B_optimal;	// Matrix with the r trajectories to be used for simulations	
+	double[][] mu; double[][] mu_cx; // Some measures; effect mean, median, std
+	double[][] mu_abs; double[][] mu_abs_cx; 
+	double[][] xi; double[][] xi_cx;
+	double[][] sigma; double[][] sigma_cx; 
+	double discrepancy;
+	// SET TO DO EE
+	// File names for running from laptop
+	
+	//private String inputFileParameters = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/FSPM_BASIC/Input/ParametersMaize.txt";
+	private String outputFileTrajectories = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/FSPM_BASIC/Output/FSPM_BASIC_Trajectories_EE_Rep_1_doesntmatter.txt";
+	public String outputFileOutputs = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/FSPM_BASIC/Output/field_Rep_2.txt"; 
+	private String outputFileEffects = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/FSPM_BASIC/Output/FSPM_BASIC_Effects_Rep_2.txt"; 
+	private String outputFileMeasuresUnscaled = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/FSPM_BASIC/Output/FSPM_BASIC_Measures_Rep_2.txt";
+	private String outputFileMeasuresScaled = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/FSPM_BASIC/Output/FSPM_BASIC_MeasuresScaled_Rep_2.txt";
+	//private String inputFileSimulationPoints = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/FSPM_BASIC/Input/SimulationPoints_Rep_1.txt"; 
+	//private String inputFileParameters = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/Polyculture OAT sims data/ParametersBean_OAT_Polyculture.txt";
+	//private String inputFileSimulationPoints = "C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/Polyculture OAT sims data/OAT_SimulationPoints_Core_1_v3.txt";
+	
+	
+	// File names for running from uni desktop
+	private String inputFileParameters = "C:/Users/pmxrr3/OneDrive - The University of Nottingham/FSPM/Polyculture OAT sims data/ParametersBean_OAT_Polyculture.txt";
+	private String inputFileSimulationPoints = "C:/Users/pmxrr3/OneDrive - The University of Nottingham/FSPM/Polyculture OAT sims data/OAT_SimulationPoints_Core_1_v3.txt";
+	
+	/*** ************************ ***/
+	/*** ************************ ***/
+	/***  Generate trajectories	  ***/	
+	/*** ************************ ***/
+	/*** ************************ ***/
+
+	void elementaryEffectsTrajectoriesEOT() {
+		Y = MatrixUtils.createRealMatrix(r*(k+1), outputLength); // Output vector
+		RealMatrix X = MatrixUtils.createRealMatrix(k, k);			// Points in parameter space to be used for analysis
+		EE = MatrixUtils.createRealMatrix(r*k, Y.getColumnDimension());			// Matrix with all elementary effects
+		RealMatrix B = MatrixUtils.createRealMatrix(k+1, k);			// Strictly lower triangular matrix of 1's
+		for (int i=0; i<k+1; i++) {					// Fill B
+			for (int j=0; j<k; j++){
+				if(j<i) B.setEntry(i,j,1);
+			}
+		}
+		// Create M>>r trajectories
+		B_total = MatrixUtils.createRealMatrix(M*(k+1),k);
+		RealMatrix P_total = MatrixUtils.createRealMatrix(M*(k),k); 
+		RealMatrix J = MatrixUtils.createRealMatrix(k+1,k); J=J.scalarAdd(1);	// k+1 x k matrix of ones
+		RealMatrix J_small = MatrixUtils.createRealMatrix(k+1,1); J_small=J_small.scalarAdd(1);		// k+1 x 1 matrix of ones
+		RealMatrix J_small2 = MatrixUtils.createRealMatrix(1,k); J_small2=J_small2.scalarAdd(1);		// 1 x k matrix of ones
+		for (int j=0; j<M; j++) {
+			RealMatrix X_init = MatrixUtils.createRealMatrix(1,k);			// Random starting point in [0,1]^k-parameter space
+			for (int i=0; i<k; i++) {
+				// Sample discrete random from {0,1/(p_i-1),...,1-Delta_i}; irandom(0,n) includes n. 
+				X_init.setEntry(0,i, (Double) irandom(0,(int)((p[i]-1)*(1-Delta.getEntry(i,0))))/(p[i]-1)); // (p-1)*x/(p-1) is workaround to ensure discrete sampling. This line is for Delta=Delta_i
+			}
+			//
+			RealMatrix D = MatrixUtils.createRealIdentityMatrix(k);				// Diagonal matrix D with random +-1
+			for (int i=0; i<D.getRowDimension(); i++) {						// Randomly change +1's to -1's in D
+				if(probability(0.5)) D.setEntry(i,i,-1);
+			}
+			//
+			RealMatrix P = MatrixUtils.createRealIdentityMatrix(k);				// Random column permutation matrix
+			RealMatrix P_temp = MatrixUtils.createRealMatrix(k,1);			// Temp matrix to store a column
+			for (int i=0; i<10000; i++) { 							// Randomly permute P
+				int rand1 = ThreadLocalRandom.current().nextInt(0, k);
+				int rand2 = ThreadLocalRandom.current().nextInt(0, k);
+				// Swap two randomly selected columns in P
+				// Parameter-dependent p and Delta gives some issues with randomisation, as we can only permute within sets of equal p/Delta. Cheapest/easiest way to fix is to put a check on the permutation cycle as below. Otherwise you need to list all different levels, then for each p_i do permutations in correct set, etc. The way below may lead to not completely equal perumation probability, for instance if #boolean parameters is relatively low. Increasing the loop size (i.e. 10k times instead of 1k) will likely fix it.
+				if(p[rand1]==p[rand2]) { // Only perform permutations on sets with same #levels p_i. 
+					P_temp.setColumnMatrix(0,P.getColumnMatrix(rand1)); // Store column r1
+					P.setColumnMatrix(rand1,P.getColumnMatrix(rand2));  // Replace column r1 with r2
+					P.setColumnMatrix(rand2,P_temp.getColumnMatrix(0)); // Replace column r2 with r1
+				}
+			}
+			//
+			// Initiate random trajectory matrix B*; each row is a point in [0,1]^k-parameter space: "B_rand = (J_small*X_init + (Delta/2)*((2*B-J)*D+J))*P"
+			DiagonalMatrix diagDelta = new DiagonalMatrix(Delta.getColumn(0));
+			RealMatrix B_rand = (J_small.multiply(X_init).add((((B.scalarMultiply(2).subtract(J)).multiply(D)).add(J)).scalarMultiply(1.0/2).multiply(diagDelta))).multiply(P); // This line is for Delta=Delta_i. Then "B_rand = (J_small*X_init + (1/2)*((2*B-J)*D+J)*Delta*J')*P", where J' is a 1xk-vector of ones.
+			// Add B_rand to B_total -> "B_total((j*(k+1)):((j+1)*(k+1)-1),:) = B_rand"; , 
+			B_total.setSubMatrix(B_rand.getData(),j*(k+1),0);
+		}
+		//
+		// Remove duplicate trajectories to ease combinatorial problem later on
+		int numzeroes = 0;
+		Boolean[] diffTraj = new Boolean[M];
+		for(int i=0; i<M; i++){diffTraj[i] = true;}
+		// Calculate Euclidean distance d_{m,l} between each pair of trajectories
+		RealMatrix d_euclid = MatrixUtils.createRealMatrix(M,M);
+		RealMatrix temp = MatrixUtils.createRealMatrix(k+1, k+1); // temporary matrix
+		double ttemp = 0; 
+		/*  
+		m-th trajectory (consisting of k+1 vectors of k elements): 	B_total(m*(k+1):(m+1)*(k+1)-1, :)
+		i-th point in m-th trajectory (i=1,...,k+1)					B_total(m*(k+1)+(i-1), :)
+		z-th coordinate of i-th point of m-th trajectory (z=1,...,k):	X_i^m(z) = B_total(m*(k+1)+(i-1), z-1)
+		So, sum_z=1^k (X_i^m(z) - X_j^l(z))^2 = sum( (B_total(m*(k+1)+(i-1),:)-B_total(l*(k+1)+(j-1),:)).^2 ,0)
+		*/
+		for (int m=0; m<M; m++) { // only loop through strictly lower diagonal part
+			for (int l=0; l<m; l++) { // diagonal = 0 by definition
+				for (int i=1; i<=k+1; i++){ // loop over points in m-th trajectory
+					for (int j=1; j<=k+1; j++){ // loop over points in l-th trajectory
+						// "temp(i,j) = sqrt(sum((B_total(m*(k+1)+(i-1),:)-B_total(l*(k+1)+(j-1),:)).^2 ,0))" 
+						temp.setEntry(i-1,j-1,(B_total.getRowVector(m*(k+1)+(i-1)).subtract(B_total.getRowVector(l*(k+1)+(j-1)))).getNorm()); // L2-norm, i.e. sqrt of sum of squares
+						ttemp += temp.getEntry(i-1,j-1);
+						if(Double.compare(temp.getEntry(i-1,j-1),0)==0){numzeroes++;} 
+					}
+				}
+				if(numzeroes == k+1) {diffTraj[m] = false;} // Mark one of the two trajectories as duplicate
+				d_euclid.setEntry(m,l,ttemp);
+				ttemp = 0;
+				numzeroes = 0;
+			}
+		}
+		d_euclid = d_euclid.add(d_euclid.transpose()); //Note: d(m,l) = d(l,m)
+		// More remove duplicate trajectories to ease combinatorial problem later on
+		int numDiff = 0;
+		for(int i=0; i<M; i++){ if(diffTraj[i]==true){numDiff++;}}
+		println("Number of unique trajectories: " + numDiff + " (out of M = " + M + ")");
+		int tttemp=0;
+		int[] diffIndices = new int[numDiff];
+		for(int i=0; i<M; i++){ if(diffTraj[i]==true){diffIndices[tttemp]= i; tttemp++;}}
+		RealMatrix d_euclidNew = MatrixUtils.createRealMatrix(numDiff,numDiff);
+		B_totalNew = MatrixUtils.createRealMatrix(numDiff*(k+1),k);
+		tttemp=0;
+		for (int m=0; m<M; m++) {
+			if(diffTraj[m]==true){
+				B_totalNew.setSubMatrix(B_total.getSubMatrix(m*(k+1),(m+1)*(k+1)-1,0,k-1).getData(),tttemp*(k+1),0);
+				tttemp++;
+			}
+		}
+		d_euclidNew.setSubMatrix(d_euclid.getSubMatrix(diffIndices,diffIndices).getData(),0,0); 
+		println("Dimensions of d_euclidNew: " + d_euclidNew.getRowDimension() + "x" + d_euclidNew.getColumnDimension());
+		/*
+		Here implemented is EOT instead of OT. OT is generally not feasible, and it is very likely the well-known papers (Campolongo et al., Khare et al., etc.) actually (potentially unknowingly) use EOT while stating they use OT. Difference is that EOT finds a local maximum, which might not be a global max. See paper.
+		*/
+		int[][] trajVec = new int[numDiff][r];
+		double[][] optDist = new double[numDiff][r];
+		double[] sumOptDist = new double[numDiff];
+		double maxNewDistDiff = 0;
+		double newDistDiff = 0;
+		int isDone;
+		int tempIndex = 0; 
+		int maxId =0;
+		double maxSoFar =0;
+		double Dmax = 0;
+		for(int m=0; m<numDiff; m++){ // Idea: in row m, start with trajectory m of M. Then incrementally add trajectory that results in max increase in D
+			trajVec[m][0]=m;
+			for(int z=1; z<r; z++){
+				maxNewDistDiff = 0;
+				for(int j=0; j<numDiff; j++){
+					isDone = 0;	
+					for(int h=0; h<z; h++){ // Check that trajectory j is not already in
+						if(j==trajVec[m][h]){ isDone=1; }	
+					}
+					if(isDone==0){
+						newDistDiff=0;
+						for(int k=0; k<z; k++){ // sum d-measures of all trajectories to the left of z with trajectory j. Pick j with highest value.
+							newDistDiff += (d_euclidNew.getEntry(trajVec[m][k],j))**2;	
+						}
+						if(newDistDiff>maxNewDistDiff){ 
+							maxNewDistDiff = newDistDiff; 
+							tempIndex = j;
+						}
+					}
+				}
+				trajVec[m][z]=tempIndex;
+				optDist[m][z]=maxNewDistDiff;
+			}
+		}
+		for(int i=0; i<numDiff; i++){
+			double tempp = 0;
+			for(int j=0; j<r; j++){ 
+				tempp+= optDist[i][j];
+			}
+			sumOptDist[i] = tempp;
+			if(tempp>maxSoFar){ 
+				maxSoFar = tempp;
+				maxId = i;
+			}
+		}
+		Dmax = maxSoFar;
+		int[] trajectoryindices = new int[r];
+		for(int i=0; i<r; i++){
+			trajectoryindices[i] = trajVec[maxId][i];
+		}
+		B_optimal = MatrixUtils.createRealMatrix(r*(k+1),k);
+		//println("D_max/[(r choose 2)*k*((k+1)^4+(k+1)^2)] (EOT) = " + Dmax/(CombinatoricsUtils.binomialCoefficient(r,2)*k*((k+1)**4+(k+1)**2)) + " with trajectories " + Arrays.toString(trajectoryindices) + " and numDiff = " + numDiff);
+		for (int i=0; i<r; i++) {
+			B_optimal.setSubMatrix(B_totalNew.getSubMatrix(trajectoryindices[i]*(k+1),(trajectoryindices[i]+1)*(k+1)-1,0,k-1).getData(), i*(k+1),0);
+		}
+		//
+		//calcDiscrepancy(B_optimal); // Calculate discrepancy of sample set 
+		// Transform parameter values (i.e. columns of B_optimal) to their actual intervals [min_i, max_i]
+		for (int i=0; i<k; i++) {
+			if(type[i]==0){
+				B_optimal.setColumnMatrix(i, (B_optimal.getColumnMatrix(i).scalarMultiply((Double) max.get(i) - (Double) min.get(i))).scalarAdd((Double) min.get(i)));
+			} else { // Ensure integer values for int/boolean inputs; somehow roundoff error might cause 10 to become 10.00000000002, for example.
+				for(int j=0; j<r*(k+1); j++){
+					B_optimal.setEntry(j,i, Math.floor(B_optimal.getEntry(j,i)*((Double) max.get(i) - (Double) min.get(i))+((Double) min.get(i))));
+				}
+			}
+		}
+		// Export trajectory to txt file using simple PrintWriter 
+		FileWriter fileWriter = new FileWriter(new File(outputFileTrajectories));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.println("For details about number of parameters and corresponding levels, see input file.");
+		for(int i = 0; i<r*(k+1); i++) {
+			printWriter.println();
+			for(int j=0; j<k; j++) {
+				printWriter.print(B_optimal.getEntry(i,j) +"  "); 
+			}
+			if((i+1)%(k+1)==0){printWriter.println();}
+		}
+		printWriter.close(); 
+	}
+	
+	void elementaryEffectsTrajectoriesStandardSobRad() { 
+	// 'Standard' Sobol radial method when possible; only QR base points for int/boolean inputs to ensure correct values
+		Y = MatrixUtils.createRealMatrix(r*(k+1), outputLength);//output.length];			// Output vector
+		EE = MatrixUtils.createRealMatrix(r*k, Y.getColumnDimension());			// Matrix with all elementary effects
+		RealMatrix sobolSequence = MatrixUtils.createRealMatrix(r+QRshift, 2*k); // matrix with all sampling points
+		InputStream inputstream = new FileInputStream("C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/EE_TestModel/Input/sobolsequenceinput.txt");
+		SobolSequenceGenerator sobolGenerator = new SobolSequenceGenerator(2*k,inputstream);
+/* 		for(int i=0; i<burninAmount/2; i++){ // Optional: QR burn-in number.
+			double[] temp = sobolGenerator.nextVector();
+		} */
+		for(int i=0; i<r+QRshift; i++){
+			double[] temp = sobolGenerator.nextVector();
+			sobolSequence.setRow(i,temp);
+			if(i>QRshift-1){
+				for(int j=0; j<k; j++){
+					if((Double) sobolSequence.getEntry(i-QRshift,j)- (Double) sobolSequence.getEntry(i,j+k)==0 ){i=i-1; break;}	// Check to avoid duplicate points in a trajectory; if duplicate, resample perturbation point
+				}
+			}
+		}
+		// transform base values to discrete ones iff int/boolean type (i.e. binning procedure). Multiply by p[i], take integer part (i.e. floor), divide by p[i]-1
+		for(int i=0; i<r; i++){
+			for(int j=0; j<k; j++){
+				if(type[j]!=0){
+					if(sobolSequence.getEntry(i,j)==1){sobolSequence.setEntry(i,j,1);} 
+					else {
+						sobolSequence.setEntry(i,j,(double) (Math.floor(sobolSequence.getEntry(i,j)*(p[j])))/(p[j]-1));
+					}
+				}
+			}
+		} 
+		B_optimal = MatrixUtils.createRealMatrix(r*(k+1),k); // Matrix with all simulation points
+		for(int i=0; i<r; i++){ // 'trajectory' i
+			for(int l=0; l<k+1; l++){ // point l on 'trajectory' (l=1 means perturbed in x1-dimension)
+				if(l==0){ // base point
+					B_optimal.setSubMatrix(sobolSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1),0); 
+				} else {
+					B_optimal.setSubMatrix(sobolSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1)+l,0);
+					if(type[l-1]!=0){
+						if(B_optimal.getEntry(i*(k+1),l-1)<Delta.getEntry(l-1,0)){
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+						} else if(B_optimal.getEntry(i*(k+1),l-1)>1-Delta.getEntry(l-1,0)) {
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+						} else {
+							double rand = random(0,1);
+							if(rand<0.5){
+								B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+							} else {
+								B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+							}
+						}
+					} else {
+						B_optimal.setEntry(i*(k+1)+l,l-1,sobolSequence.getEntry(i+QRshift,k+l-1));
+					}
+				}
+			}
+		}
+		
+		/* // calculate "spread" measure to compare to EOT 
+		// Calculate Euclidean distance d_{m,l} between each pair of trajectories
+		RealMatrix d_euclidsob = MatrixUtils.createRealMatrix(r,r);
+		RealMatrix tempsob = MatrixUtils.createRealMatrix(k+1, k+1); // temporary matrix
+		double ttemp = 0; 
+		for (int m=0; m<r; m++) { // only loop through strictly lower diagonal part
+			for (int l=0; l<m; l++) { // diagonal = 0 by definition
+				for (int i=1; i<=k+1; i++){ // loop over points in m-th trajectory
+					for (int j=1; j<=k+1; j++){ // loop over points in l-th trajectory
+						tempsob.setEntry(i-1,j-1,(B_optimal.getRowVector(m*(k+1)+(i-1)).subtract(B_optimal.getRowVector(l*(k+1)+(j-1)))).getNorm()); // L2-norm, i.e. sqrt of sum of squares
+						ttemp += tempsob.getEntry(i-1,j-1);
+					}
+				}
+				d_euclidsob.setEntry(m,l,ttemp);
+				ttemp = 0;
+			}
+		}
+		d_euclidsob = d_euclidsob.add(d_euclidsob.transpose()); //Note: d(m,l) = d(l,m)
+		//
+		// Calculate spread D_maxsob for r trajectories
+		double sum = 0;
+		double D_maxsob; // Array containing the maximum value of spread D
+		int i_temp = 0;
+		List comb_choose_2 = new ArrayList(); 		// Create list for all pairs of indices 
+		Iterator iterator2 = CombinatoricsUtils.combinationsIterator(r, 2); 
+		while (iterator2.hasNext()) {				// Sum d_z,l^2 for each pair of indices and store result as D_maxsob
+			final int[] combination2 = (int[]) iterator2.next();
+			int[] temp2 = {combination2[0],combination2[1]};
+			comb_choose_2.add(temp2);
+		}
+		for(int[] i : comb_choose_2) {
+			sum += d_euclidsob.getEntry(i[0], i[1])**2;
+		}
+		D_maxsob=sum;
+		println("D_max/[(r choose 2)*k*((k+1)^4+(k+1)^2)] (Sobol 'Standard') = " + D_maxsob/(CombinatoricsUtils.binomialCoefficient(r,2)*k*((k+1)**4+(k+1)**2)));
+		calcDiscrepancy(B_optimal); // Calculate discrepancy of sample set  
+		*/
+		// Transform parameter values (i.e. columns of B_rand) to their actual intervals [min_i, max_i]
+		for (int i=0; i<k; i++) {
+			if(type[i]==0){
+				B_optimal.setColumnMatrix(i, (B_optimal.getColumnMatrix(i).scalarMultiply((Double) max.get(i) - (Double) min.get(i))).scalarAdd((Double) min.get(i)));
+			} else { // Ensure integer values for int/boolean inputs; somehow roundoff error might cause 10 to become 10.00000000002, for example.
+				for(int j=0; j<r*(k+1); j++){
+					B_optimal.setEntry(j,i, Math.floor(B_optimal.getEntry(j,i)*((Double) max.get(i) - (Double) min.get(i))+((Double) min.get(i))));
+				}
+			}
+		}
+		// Export trajectory to txt file using simple PrintWriter
+		FileWriter fileWriter = new FileWriter(new File(outputFileTrajectories));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.println("For details about number of parameters and corresponding levels, see input file.");
+		for(int i = 0; i<r*(k+1); i++) {
+			printWriter.println();
+			for(int j=0; j<k; j++) {
+				printWriter.print(B_optimal.getEntry(i,j) + "  " ); 
+			}
+			if((i+1)%(k+1)==0){printWriter.println();}
+		}
+		printWriter.close(); 
+	}
+	
+	void elementaryEffectsTrajectoriesStandardSobWind() { 
+	// 'Standard' Sobol winding method when possible; only QR base points for int/boolean inputs to ensure correct values
+		Y = MatrixUtils.createRealMatrix(r*(k+1), outputLength);			// Output vector
+		EE = MatrixUtils.createRealMatrix(r*k, Y.getColumnDimension());			// Matrix with all elementary effects
+		RealMatrix sobolSequence = MatrixUtils.createRealMatrix(r+QRshift, 2*k); // matrix with all sampling points
+		InputStream inputstream = new FileInputStream("C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/EE_TestModel/Input/sobolsequenceinput.txt");
+		SobolSequenceGenerator sobolGenerator = new SobolSequenceGenerator(2*k,inputstream);
+/* 		for(int i=0; i<burninAmount/2; i++){ // Optional: QR burn-in number.
+			double[] temp = sobolGenerator.nextVector();
+		} */
+		for(int i=0; i<r+QRshift; i++){
+			double[] temp = sobolGenerator.nextVector();
+			sobolSequence.setRow(i,temp);
+			if(i>QRshift-1){
+				for(int j=0; j<k; j++){
+					if((Double) sobolSequence.getEntry(i-QRshift,j)- (Double) sobolSequence.getEntry(i,j+k)==0 ){i=i-1; break;}	// Check to avoid duplicate points in a trajectory; if duplicate, resample perturbation point
+				}
+			}
+		}
+		
+		// transform base values to discrete ones iff int/boolean type (i.e. binning procedure). Multiply by p[i], take integer part (i.e. floor), divide by p[i]-1
+		for(int i=0; i<r; i++){
+			for(int j=0; j<k; j++){
+				if(type[j]!=0){
+					if(sobolSequence.getEntry(i,j)==1){sobolSequence.setEntry(i,j,1);} 
+					else {
+						sobolSequence.setEntry(i,j,(double) (Math.floor(sobolSequence.getEntry(i,j)*(p[j])))/(p[j]-1));
+					}
+				}
+			}
+		} 
+		B_optimal = MatrixUtils.createRealMatrix(r*(k+1),k); // Matrix with all simulation points
+		for(int i=0; i<r; i++){ // 'trajectory' i
+			for(int l=0; l<k+1; l++){ // point l on 'trajectory' (l=1 means perturbed in x1-dimension)
+				if(l==0){ // base point
+					B_optimal.setSubMatrix(sobolSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1),0); 
+				} else {
+					B_optimal.setSubMatrix(sobolSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1)+l,0);
+					if(type[l-1]!=0){
+						if(B_optimal.getEntry(i*(k+1),l-1)<Delta.getEntry(l-1,0)){
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+						} else if(B_optimal.getEntry(i*(k+1),l-1)>1-Delta.getEntry(l-1,0)) {
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+						} else {
+							double rand = random(0,1);
+							if(rand<0.5){
+								B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+							} else {
+								B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+							}
+						}
+					} else {
+						for(int ii=0; ii<l; ii++){
+							B_optimal.setEntry(i*(k+1)+l,ii,sobolSequence.getEntry(i+QRshift,k+ii)); 
+						}
+					}
+				}
+			}
+		}
+
+		/* // calculate "spread" measure to compare to EOT 
+		// Calculate Euclidean distance d_{m,l} between each pair of trajectories
+		RealMatrix d_euclidsob = MatrixUtils.createRealMatrix(r,r);
+		RealMatrix tempsob = MatrixUtils.createRealMatrix(k+1, k+1); // temporary matrix
+		double ttemp = 0; 
+		for (int m=0; m<r; m++) { // only loop through strictly lower diagonal part
+			for (int l=0; l<m; l++) { // diagonal = 0 by definition
+				for (int i=1; i<=k+1; i++){ // loop over points in m-th trajectory
+					for (int j=1; j<=k+1; j++){ // loop over points in l-th trajectory
+						tempsob.setEntry(i-1,j-1,(B_optimal.getRowVector(m*(k+1)+(i-1)).subtract(B_optimal.getRowVector(l*(k+1)+(j-1)))).getNorm()); // L2-norm, i.e. sqrt of sum of squares
+						ttemp += tempsob.getEntry(i-1,j-1);
+					}
+				}
+				d_euclidsob.setEntry(m,l,ttemp);
+				ttemp = 0;
+			}
+		}
+		d_euclidsob = d_euclidsob.add(d_euclidsob.transpose()); //Note: d(m,l) = d(l,m)
+		//
+		// Calculate spread D_maxsob for r trajectories
+		double sum = 0;
+		double D_maxsob; // Array containing the maximum value of spread D
+		int i_temp = 0;
+		List comb_choose_2 = new ArrayList(); 		// Create list for all pairs of indices 
+		Iterator iterator2 = CombinatoricsUtils.combinationsIterator(r, 2); 
+		while (iterator2.hasNext()) {				// Sum d_z,l^2 for each pair of indices and store result as D_maxsob
+			final int[] combination2 = (int[]) iterator2.next();
+			int[] temp2 = {combination2[0],combination2[1]};
+			comb_choose_2.add(temp2);
+		}
+		for(int[] i : comb_choose_2) {
+			sum += d_euclidsob.getEntry(i[0], i[1])**2;
+		}
+		D_maxsob=sum;
+		println("D_max/[(r choose 2)*k*((k+1)^4+(k+1)^2)] (Sobol 'Standard winding') = " + D_maxsob/(CombinatoricsUtils.binomialCoefficient(r,2)*k*((k+1)**4+(k+1)**2)));
+		calcDiscrepancy(B_optimal); // Calculate discrepancy of sample set  */
+		// Transform parameter values (i.e. columns of B_rand) to their actual intervals [min_i, max_i]
+		for (int i=0; i<k; i++) {
+			if(type[i]==0){
+				B_optimal.setColumnMatrix(i, (B_optimal.getColumnMatrix(i).scalarMultiply((Double) max.get(i) - (Double) min.get(i))).scalarAdd((Double) min.get(i)));
+			} else { // Ensure integer values for int/boolean inputs; somehow roundoff error might cause 10 to become 10.00000000002, for example.
+				for(int j=0; j<r*(k+1); j++){
+					B_optimal.setEntry(j,i, Math.floor(B_optimal.getEntry(j,i)*((Double) max.get(i) - (Double) min.get(i))+((Double) min.get(i))));
+				}
+			}
+		}
+		// Export trajectory to txt file using simple PrintWriter
+		FileWriter fileWriter = new FileWriter(new File(outputFileTrajectories));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.println("For details about number of parameters and corresponding levels, see input file.");
+		for(int i = 0; i<r*(k+1); i++) {
+			printWriter.println();
+			for(int j=0; j<k; j++) {
+				printWriter.print(B_optimal.getEntry(i,j) + "  " ); 
+			}
+			if((i+1)%(k+1)==0){printWriter.println();}
+		}
+		printWriter.close(); 
+	}
+	
+	void elementaryEffectsTrajectoriesStandardRdRad() {
+		// Standard Rd QR radial when possible: generate base points with R2, then step according to delta-values for int/boolean type
+		Y = MatrixUtils.createRealMatrix(r*(k+1), outputLength);	// Output vector
+		EE = MatrixUtils.createRealMatrix(r*k, Y.getColumnDimension());			// Matrix with all elementary effects
+		RealMatrix rSequence = MatrixUtils.createRealMatrix(r+QRshift, 2*k); // matrix with base points 
+		double phi=2; // Approximation of solution phi_d to x^(d+1)=x+1
+		for(int i=0; i<20; i++){
+			phi = Math.pow((1+phi),(1.0/(k+1))); 
+		}
+		double[] alpha = new double[2*k];
+		for(int i=0; i<2*k; i++){
+			alpha[i] = (1/(phi**(i+1)))%1;
+		}
+		for(int i=0; i<r+QRshift; i++){
+			for(int j=0; j<2*k; j++){ // seed (here 0.5) can be anything, but apparently 0.5 is generally better
+				//rSequence.setEntry(i,j,(0.5+alpha[j]*(i+1))%1);
+				rSequence.setEntry(i,j,(0.5+alpha[j]*(i+1+burninAmount))%1); // Optional QR burn-in
+			}
+		}
+		//transform base values to discrete ones iff int/boolean type (i.e. binning procedure). Multiply by p[i], take integer part (i.e. floor), divide by p[i]-1
+		for(int i=0; i<r; i++){
+			for(int j=0; j<k; j++){
+				if(type[j]!=0){
+					if(rSequence.getEntry(i,j)==1){rSequence.setEntry(i,j,1);} 
+					else {
+						rSequence.setEntry(i,j,(double) (Math.floor(rSequence.getEntry(i,j)*(p[j])))/(p[j]-1));
+					}
+				}
+			}
+		} 
+		//
+		B_optimal = MatrixUtils.createRealMatrix(r*(k+1),k); // Matrix with all simulation points
+		for(int i=0; i<r; i++){ // 'trajectory' i
+			for(int l=0; l<k+1; l++){ // point l on 'trajectory' (l=1 means perturbed in x1-dimension)
+				if(l==0){ // base point
+					B_optimal.setSubMatrix(rSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1),0); 
+				} else {
+					B_optimal.setSubMatrix(rSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1)+l,0); //TEST 17/11/21
+					if(type[l-1]!=0){ // For TEST 03/11/21 test effect of randomness in model: comment this block.
+						if(B_optimal.getEntry(i*(k+1),l-1)<Delta.getEntry(l-1,0)){
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+						} else if(B_optimal.getEntry(i*(k+1),l-1)>1-Delta.getEntry(l-1,0)) {
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+						} else {
+							double rand = random(0,1);
+							if(rand<0.5){
+								B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+							} else {
+								B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+							}
+						}
+					} else {
+						B_optimal.setEntry(i*(k+1)+l,l-1,rSequence.getEntry(i+QRshift,k+l-1)); 
+					}
+				}
+			}
+		}
+
+		/* // calculate "spread" measure to compare to EOT 
+		// Calculate Euclidean distance d_{m,l} between each pair of trajectories
+		RealMatrix d_euclidrad = MatrixUtils.createRealMatrix(r,r);
+		RealMatrix temprad = MatrixUtils.createRealMatrix(k+1, k+1); // temporary matrix
+		double ttemp = 0; 
+		for (int m=0; m<r; m++) { // only loop through strictly lower diagonal part
+			for (int l=0; l<m; l++) { // diagonal = 0 by definition
+				for (int i=1; i<=k+1; i++){ // loop over points in m-th trajectory
+					for (int j=1; j<=k+1; j++){ // loop over points in l-th trajectory
+						temprad.setEntry(i-1,j-1,(B_optimal.getRowVector(m*(k+1)+(i-1)).subtract(B_optimal.getRowVector(l*(k+1)+(j-1)))).getNorm()); // L2-norm, i.e. sqrt of sum of squares
+						ttemp += temprad.getEntry(i-1,j-1);
+					}
+				}
+				d_euclidrad.setEntry(m,l,ttemp);
+				ttemp = 0;
+			}
+		}
+		d_euclidrad = d_euclidrad.add(d_euclidrad.transpose()); //Note: d(m,l) = d(l,m)
+		//
+		// Calculate spread D_spread 
+		double sum = 0;
+		double D_maxrad; // Array containing the maximum value of spread D
+		int i_temp = 0;
+		List comb_choose_2 = new ArrayList(); 		// Create list for all pairs of indices 
+		Iterator iterator2 = CombinatoricsUtils.combinationsIterator(r, 2); 
+		while (iterator2.hasNext()) {				// Sum d_z,l^2 for each pair of indices and store result as D(index of m_choose_r)
+			final int[] combination2 = (int[]) iterator2.next();
+			int[] temp2 = {combination2[0],combination2[1]};
+			comb_choose_2.add(temp2);
+		}
+		for(int[] i : comb_choose_2) {
+			sum += d_euclidrad.getEntry(i[0], i[1])**2;
+		}
+		D_maxrad=sum;
+		println("D_max/[(r choose 2)*k*((k+1)^4+(k+1)^2)] (R-seq 'Standard') = " + D_maxrad/(CombinatoricsUtils.binomialCoefficient(r,2)*k*((k+1)**4+(k+1)**2)));
+		calcDiscrepancy(B_optimal); // Calculate discrepancy of sample set  */
+		// Transform parameter values (i.e. columns of B_rand) to their actual intervals [min_i, max_i]
+		for (int i=0; i<k; i++) {
+			if(type[i]==0){
+				B_optimal.setColumnMatrix(i, (B_optimal.getColumnMatrix(i).scalarMultiply((Double) max.get(i) - (Double) min.get(i))).scalarAdd((Double) min.get(i)));
+			} else { // Ensure integer values for int/boolean inputs; somehow roundoff error might cause 10 to become 10.00000000002, for example.
+				for(int j=0; j<r*(k+1); j++){
+					B_optimal.setEntry(j,i, Math.floor(B_optimal.getEntry(j,i)*((Double) max.get(i) - (Double) min.get(i))+((Double) min.get(i))));
+				}
+			}
+		}
+		// Export trajectory to txt file using simple PrintWriter 
+		FileWriter fileWriter = new FileWriter(new File(outputFileTrajectories));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.println("For details about number of parameters and corresponding levels, see input file.");
+		for(int i = 0; i<r*(k+1); i++) {
+			printWriter.println();
+			for(int j=0; j<k; j++) {
+				printWriter.print(B_optimal.getEntry(i,j) + "  " ); 
+			}
+			if((i+1)%(k+1)==0){printWriter.println();}
+		}
+		printWriter.close(); 
+	}
+	
+	/*void elementaryEffectsTrajectoriesStandardRdRad() {
+		// TEST 24/12/21 calc effects rep 1
+		Y = MatrixUtils.createRealMatrix(r*(k+1), outputLength);	// Output vector
+		EE = MatrixUtils.createRealMatrix(r*k, Y.getColumnDimension());			// Matrix with all elementary effects
+		B_optimal = MatrixUtils.createRealMatrix(r*(k+1),k); // Matrix with all simulation points
+		int lines = 0;
+		try
+		{
+			Scanner scanner = new Scanner(new File(inputFileSimulationPoints));
+			while(scanner.hasNextLine()){
+				String[] tempvalue = scanner.nextLine().split("\\s+");
+				for(int i=0; i<k; i++){
+					B_optimal.setEntry(lines,i,Double.parseDouble(tempvalue[i]));
+				}
+				lines++;
+				scanner.nextLine();
+			}
+			scanner.close();
+		}
+		catch(FileNotFoundException e)
+		{
+			println(e.getMessage());
+		}
+		
+	}*/
+	
+	void elementaryEffectsTrajectoriesStandardRdWind() {
+		// Standard Rd QR winding when possible: generate base points with Rd, then step according to delta-values for int/boolean type
+		Y = MatrixUtils.createRealMatrix(r*(k+1), outputLength);	// Output vector
+		EE = MatrixUtils.createRealMatrix(r*k, Y.getColumnDimension());			// Matrix with all elementary effects
+
+		RealMatrix rSequence = MatrixUtils.createRealMatrix(r+QRshift, 2*k); // matrix with base points 
+		double phi=2; // Approximation of solution phi_d to x^(d+1)=x+1
+		for(int i=0; i<20; i++){
+			phi = Math.pow((1+phi),(1.0/(k+1))); 
+		}
+		double[] alpha = new double[2*k];
+		for(int i=0; i<2*k; i++){
+			alpha[i] = (1/(phi**(i+1)))%1;
+		}
+		for(int i=0; i<r+QRshift; i++){
+			for(int j=0; j<2*k; j++){ // seed (here 0.5) can be anything, but apparently 0.5 is generally better
+				//rSequence.setEntry(i,j,(0.5+alpha[j]*(i+1))%1); 
+				rSequence.setEntry(i,j,(0.5+alpha[j]*(i+1+burninAmount))%1); // Optional QR burn-in
+			}
+		}
+		//transform base values to discrete ones iff int/boolean type (i.e. binning procedure). Multiply by p[i], take integer part (i.e. floor), divide by p[i]-1
+		for(int i=0; i<r; i++){
+			for(int j=0; j<k; j++){
+				if(type[j]!=0){
+					if(rSequence.getEntry(i,j)==1){rSequence.setEntry(i,j,1);} 
+					else {
+						rSequence.setEntry(i,j,(double) (Math.floor(rSequence.getEntry(i,j)*(p[j])))/(p[j]-1));
+					}
+				}
+			}
+		} 
+		//
+		B_optimal = MatrixUtils.createRealMatrix(r*(k+1),k); // Matrix with all simulation points
+		for(int i=0; i<r; i++){ // 'trajectory' i
+			for(int l=0; l<k+1; l++){ // point l on 'trajectory' (l=1 means perturbed in x1-dimension)
+				if(l==0){ // base point
+					B_optimal.setSubMatrix(rSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1),0); 
+				} else {
+					B_optimal.setSubMatrix(rSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1)+l,0);
+					if(type[l-1]!=0){
+						if(B_optimal.getEntry(i*(k+1),l-1)<Delta.getEntry(l-1,0)){
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+						} else if(B_optimal.getEntry(i*(k+1),l-1)>1-Delta.getEntry(l-1,0)) {
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+						} else {
+							double rand = random(0,1);
+							if(rand<0.5){
+								B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+							} else {
+								B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+							}
+						}
+					} else {
+						for(int ii=0; ii<l; ii++){
+							B_optimal.setEntry(i*(k+1)+l,ii,rSequence.getEntry(i+QRshift,k+ii)); 
+						}
+					}
+				}
+			}
+		}
+
+		/* // calculate "spread" measure to compare to EOT 
+		// Calculate Euclidean distance d_{m,l} between each pair of trajectories
+		RealMatrix d_euclidrad = MatrixUtils.createRealMatrix(r,r);
+		RealMatrix temprad = MatrixUtils.createRealMatrix(k+1, k+1); // temporary matrix
+		double ttemp = 0; 
+		for (int m=0; m<r; m++) { // only loop through strictly lower diagonal part
+			for (int l=0; l<m; l++) { // diagonal = 0 by definition
+				for (int i=1; i<=k+1; i++){ // loop over points in m-th trajectory
+					for (int j=1; j<=k+1; j++){ // loop over points in l-th trajectory
+						temprad.setEntry(i-1,j-1,(B_optimal.getRowVector(m*(k+1)+(i-1)).subtract(B_optimal.getRowVector(l*(k+1)+(j-1)))).getNorm()); // L2-norm, i.e. sqrt of sum of squares
+						ttemp += temprad.getEntry(i-1,j-1);
+					}
+				}
+				d_euclidrad.setEntry(m,l,ttemp);
+				ttemp = 0;
+			}
+		}
+		d_euclidrad = d_euclidrad.add(d_euclidrad.transpose()); //Note: d(m,l) = d(l,m)
+		//
+		// Calculate spread D_spread 
+		double sum = 0;
+		double D_maxrad; // Array containing the maximum value of spread D
+		int i_temp = 0;
+		List comb_choose_2 = new ArrayList(); 		// Create list for all pairs of indices 
+		Iterator iterator2 = CombinatoricsUtils.combinationsIterator(r, 2); 
+		while (iterator2.hasNext()) {				// Sum d_z,l^2 for each pair of indices and store result as D(index of m_choose_r)
+			final int[] combination2 = (int[]) iterator2.next();
+			int[] temp2 = {combination2[0],combination2[1]};
+			comb_choose_2.add(temp2);
+		}
+		for(int[] i : comb_choose_2) {
+			sum += d_euclidrad.getEntry(i[0], i[1])**2;
+		}
+		D_maxrad=sum;
+		println("D_max/[(r choose 2)*k*((k+1)^4+(k+1)^2)] (R-seq 'Standard') = " + D_maxrad/(CombinatoricsUtils.binomialCoefficient(r,2)*k*((k+1)**4+(k+1)**2)));
+		calcDiscrepancy(B_optimal); // Calculate discrepancy of sample set  */
+		// Transform parameter values (i.e. columns of B_rand) to their actual intervals [min_i, max_i]
+		for (int i=0; i<k; i++) {
+			if(type[i]==0){
+				B_optimal.setColumnMatrix(i, (B_optimal.getColumnMatrix(i).scalarMultiply((Double) max.get(i) - (Double) min.get(i))).scalarAdd((Double) min.get(i)));
+			} else { // Ensure integer values for int/boolean inputs; somehow roundoff error might cause 10 to become 10.00000000002, for example.
+				for(int j=0; j<r*(k+1); j++){
+					B_optimal.setEntry(j,i, Math.floor(B_optimal.getEntry(j,i)*((Double) max.get(i) - (Double) min.get(i))+((Double) min.get(i))));
+				}
+			}
+		}
+		// Export trajectory to txt file using simple PrintWriter 
+		FileWriter fileWriter = new FileWriter(new File(outputFileTrajectories));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.println("For details about number of parameters and corresponding levels, see input file.");
+		for(int i = 0; i<r*(k+1); i++) {
+			printWriter.println();
+			for(int j=0; j<k; j++) {
+				printWriter.print(B_optimal.getEntry(i,j) + "  " ); 
+			}
+			if((i+1)%(k+1)==0){printWriter.println();}
+		}
+		printWriter.close(); 
+	}
+	
+	void elementaryEffectsTrajectoriesPinnedSobRad() { 
+	// Pinned Sobol radial method; only (pinned) QR base points for all input types
+		Y = MatrixUtils.createRealMatrix(r*(k+1), outputLength); // Output vector
+		EE = MatrixUtils.createRealMatrix(r*k, Y.getColumnDimension());			// Matrix with all elementary effects
+		RealMatrix sobolSequence = MatrixUtils.createRealMatrix(r, k); // matrix with all sampling points 
+		InputStream inputstream = new FileInputStream("C:/Users/Rik/OneDrive - The University of Nottingham/FSPM/EE_TestModel/Input/sobolsequenceinput.txt");
+		SobolSequenceGenerator sobolGenerator = new SobolSequenceGenerator(k,inputstream);
+/* 		for(int i=0; i<burninAmount/2; i++){ // Optional QR burn-in
+			double[] temp = sobolGenerator.nextVector();
+		} */
+		for(int i=0; i<r; i++){
+			double[] temp = sobolGenerator.nextVector();
+			sobolSequence.setRow(i,temp);
+		}
+		//transform continuous values to discrete ones (i.e. binning procedure). Multiply by p[i], take integer part (i.e. floor), divide by p[i]-1
+		for(int i=0; i<r; i++){
+			for(int j=0; j<k; j++){
+				if(sobolSequence.getEntry(i,j)==1){sobolSequence.setEntry(i,j,1);} else {
+				sobolSequence.setEntry(i,j,(double) (Math.floor(sobolSequence.getEntry(i,j)*(p[j])))/(p[j]-1));}
+			}
+		}
+		B_optimal = MatrixUtils.createRealMatrix(r*(k+1),k); // Matrix with all simulation points
+		for(int i=0; i<r; i++){ // input i
+			for(int l=0; l<k+1; l++){ // observation l
+				if(l==0){ // base point
+					B_optimal.setSubMatrix(sobolSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1),0); 
+				} else {
+					B_optimal.setSubMatrix(sobolSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1)+l,0);
+					if(B_optimal.getEntry(i*(k+1),l-1)<Delta.getEntry(l-1,0)){
+						B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+					} else if(B_optimal.getEntry(i*(k+1),l-1)>1-Delta.getEntry(l-1,0)) {
+						B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+					} else {
+						double rand = random(0,1);
+						if(rand<0.5){
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+						} else {
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+						}
+					}
+				}
+			}
+		}
+		/* // calculate "spread" measure to compare to EOT 
+		// Calculate Euclidean distance d_{m,l} between each pair of trajectories
+		RealMatrix d_euclidsob = MatrixUtils.createRealMatrix(r,r);
+		RealMatrix tempsob = MatrixUtils.createRealMatrix(k+1, k+1); // temporary matrix
+		double ttemp = 0; 
+		for (int m=0; m<r; m++) { // only loop through strictly lower diagonal part
+			for (int l=0; l<m; l++) { // diagonal = 0 by definition
+				for (int i=1; i<=k+1; i++){ // loop over points in m-th trajectory
+					for (int j=1; j<=k+1; j++){ // loop over points in l-th trajectory
+						tempsob.setEntry(i-1,j-1,(B_optimal.getRowVector(m*(k+1)+(i-1)).subtract(B_optimal.getRowVector(l*(k+1)+(j-1)))).getNorm()); // L2-norm, i.e. sqrt of sum of squares
+						ttemp += tempsob.getEntry(i-1,j-1);
+					}
+				}
+				d_euclidsob.setEntry(m,l,ttemp);
+				ttemp = 0;
+			}
+		}
+		d_euclidsob = d_euclidsob.add(d_euclidsob.transpose()); //Note: d(m,l) = d(l,m)
+		//
+		// Calculate spread D_spread for each combination of r trajectories out of M
+		double sum = 0;
+		double D_maxsob; // Array containing the maximum value of spread D
+		int i_temp = 0;
+		List comb_choose_2 = new ArrayList(); 		// Create list for all pairs of indices 
+		Iterator iterator2 = CombinatoricsUtils.combinationsIterator(r, 2); 
+		while (iterator2.hasNext()) {				// Sum d_z,l^2 for each pair of indices and store result as D(index of m_choose_r)
+			final int[] combination2 = (int[]) iterator2.next();
+			int[] temp2 = {combination2[0],combination2[1]};
+			comb_choose_2.add(temp2);
+		}
+		for(int[] i : comb_choose_2) {
+			sum += d_euclidsob.getEntry(i[0], i[1])**2;
+		}
+		D_maxsob=sum;
+		println("D_max/[(r choose 2)*k*((k+1)^4+(k+1)^2)] (Sobol (base only)) = " + D_maxsob/(CombinatoricsUtils.binomialCoefficient(r,2)*k*((k+1)**4+(k+1)**2)));
+		calcDiscrepancy(B_optimal); // Calculate discrepancy of sample set  */
+		// Transform parameter values (i.e. columns of B_rand) to their actual intervals [min_i, max_i]
+		for (int i=0; i<k; i++) {
+			if(type[i]==0){
+				B_optimal.setColumnMatrix(i, (B_optimal.getColumnMatrix(i).scalarMultiply((Double) max.get(i) - (Double) min.get(i))).scalarAdd((Double) min.get(i)));
+			} else { // Ensure integer values for int/boolean inputs; somehow roundoff error might cause 10 to become 10.00000000002, for example.
+				for(int j=0; j<r*(k+1); j++){
+					B_optimal.setEntry(j,i, Math.floor(B_optimal.getEntry(j,i)*((Double) max.get(i) - (Double) min.get(i))+((Double) min.get(i))));
+				}
+			}
+		}
+		// Export trajectory to txt file using simple PrintWriter
+		FileWriter fileWriter = new FileWriter(new File(outputFileTrajectories));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.println("For details about number of parameters and corresponding levels, see input file.");
+		for(int i = 0; i<r*(k+1); i++) {
+			printWriter.println();
+			for(int j=0; j<k; j++) {
+				printWriter.print(B_optimal.getEntry(i,j) + "  " ); 
+			}
+			if((i+1)%(k+1)==0){printWriter.println();}
+		}
+		printWriter.close(); 
+	}
+	
+	void elementaryEffectsTrajectoriesPinnedRdRad() {
+		// Pinned Rd radial method; only (pinned) QR base points for all input types
+		Y = MatrixUtils.createRealMatrix(r*(k+1), outputLength);	// Output vector
+		EE = MatrixUtils.createRealMatrix(r*k, Y.getColumnDimension());			// Matrix with all elementary effects
+		RealMatrix rSequence = MatrixUtils.createRealMatrix(r, k); // matrix with base points 
+		double phi=2; // Approximation of solution phi_d to x^(d+1)=x+1
+		for(int i=0; i<20; i++){
+			phi = Math.pow((1+phi),(1.0/(k+1))); 
+		}
+		double[] alpha = new double[k];
+		for(int i=0; i<k; i++){
+			alpha[i] = (1/(phi**(i+1)))%1;
+		}
+		for(int i=0; i<r; i++){
+			for(int j=0; j<k; j++){ // seed (here 0.5) can be anything, but apparently 0.5 is generally better
+				//rSequence.setEntry(i,j,(0.5+alpha[j]*(i+1))%1);
+				rSequence.setEntry(i,j,(0.5+alpha[j]*(i+1+burninAmount))%1); // Optional QR burn-in
+			}
+		}
+		// Transform sampled values to attainable ones (n/(p_i-1)) (i.e. binning procedure). Multiply by p[i], take integer part (i.e. floor), divide by p[i]-1
+		for(int i=0; i<r; i++){
+			for(int j=0; j<k; j++){
+				if(rSequence.getEntry(i,j)==1){rSequence.setEntry(i,j,1);} else {
+					rSequence.setEntry(i,j,(double) (Math.floor(rSequence.getEntry(i,j)*(p[j])))/(p[j]-1));
+				}
+			}
+		} 
+		B_optimal = MatrixUtils.createRealMatrix(r*(k+1),k); // Matrix with all simulation points
+		for(int i=0; i<r; i++){ // input i
+			for(int l=0; l<k+1; l++){ // observation l
+				if(l==0){ // base point
+					B_optimal.setSubMatrix(rSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1),0); 
+				} else {
+					B_optimal.setSubMatrix(rSequence.getSubMatrix(i,i,0,k-1).getData(),i*(k+1)+l,0);
+					if(B_optimal.getEntry(i*(k+1),l-1)<Delta.getEntry(l-1,0)){
+						B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+					} else if(B_optimal.getEntry(i*(k+1),l-1)>1-Delta.getEntry(l-1,0)) {
+						B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+					} else {
+						double rand = random(0,1);
+						if(rand<0.5){
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)+Delta.getEntry(l-1,0));
+						} else {
+							B_optimal.setEntry(i*(k+1)+l,l-1,B_optimal.getEntry(i*(k+1),l-1)-Delta.getEntry(l-1,0));
+						}
+					}
+				}
+			}
+		}
+		/* // calculate "spread" measure to compare to EOT 
+		// Calculate Euclidean distance d_{m,l} between each pair of trajectories
+		RealMatrix d_euclidrad = MatrixUtils.createRealMatrix(r,r);
+		RealMatrix temprad = MatrixUtils.createRealMatrix(k+1, k+1); // temporary matrix
+		double ttemp = 0; 
+		for (int m=0; m<r; m++) { // only loop through strictly lower diagonal part
+			for (int l=0; l<m; l++) { // diagonal = 0 by definition
+				for (int i=1; i<=k+1; i++){ // loop over points in m-th trajectory
+					for (int j=1; j<=k+1; j++){ // loop over points in l-th trajectory
+						temprad.setEntry(i-1,j-1,(B_optimal.getRowVector(m*(k+1)+(i-1)).subtract(B_optimal.getRowVector(l*(k+1)+(j-1)))).getNorm()); // L2-norm, i.e. sqrt of sum of squares
+						ttemp += temprad.getEntry(i-1,j-1);
+					}
+				}
+				d_euclidrad.setEntry(m,l,ttemp);
+				ttemp = 0;
+			}
+		}
+		d_euclidrad = d_euclidrad.add(d_euclidrad.transpose()); //Note: d(m,l) = d(l,m)
+		//
+		// Calculate spread 
+		double sum = 0;
+		double D_maxrad; // Array containing the maximum value of spread D 
+		int i_temp = 0;
+		List comb_choose_2 = new ArrayList(); 		// Create list for all pairs of indices 
+		Iterator iterator2 = CombinatoricsUtils.combinationsIterator(r, 2); 
+		while (iterator2.hasNext()) {				// Sum d_z,l^2 for each pair of indices 
+			final int[] combination2 = (int[]) iterator2.next();
+			int[] temp2 = {combination2[0],combination2[1]};
+			comb_choose_2.add(temp2);
+		}
+		for(int[] i : comb_choose_2) {
+			sum += d_euclidrad.getEntry(i[0], i[1])**2;
+		}
+		D_maxrad=sum;
+		println("D_max/[(r choose 2)*k*((k+1)^4+(k+1)^2)] (R-seq (base only)) = " + D_maxrad/(CombinatoricsUtils.binomialCoefficient(r,2)*k*((k+1)**4+(k+1)**2)));
+		calcDiscrepancy(B_optimal); // Calculate discrepancy of sample set  */
+		// Transform parameter values (i.e. columns of B_rand) to their actual intervals [min_i, max_i]
+		for (int i=0; i<k; i++) {
+			if(type[i]==0){
+				B_optimal.setColumnMatrix(i, (B_optimal.getColumnMatrix(i).scalarMultiply((Double) max.get(i) - (Double) min.get(i))).scalarAdd((Double) min.get(i)));
+			} else { // Ensure integer values for int/boolean inputs; somehow roundoff error might cause 10 to become 10.00000000002, for example.
+				for(int j=0; j<r*(k+1); j++){
+					B_optimal.setEntry(j,i, Math.floor(B_optimal.getEntry(j,i)*((Double) max.get(i) - (Double) min.get(i))+((Double) min.get(i))));
+				}
+			}
+		}
+		// Export trajectory to txt file using simple PrintWriter 
+		FileWriter fileWriter = new FileWriter(new File(outputFileTrajectories));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.println("For details about number of parameters and corresponding levels, see input file.");
+		for(int i = 0; i<r*(k+1); i++) {
+			printWriter.println();
+			for(int j=0; j<k; j++) {
+				printWriter.print(B_optimal.getEntry(i,j) + "  " ); 
+			}
+			if((i+1)%(k+1)==0){printWriter.println();}
+		}
+		printWriter.close(); 
+	}
+	
+	/*** ************************ ***/
+	/*** ************************ ***/
+	/*** 	Calculate effects	  ***/	
+	/*** ************************ ***/
+	/*** ************************ ***/	
+	
+	void elementaryEffectsCalcEffectsWinding() {
+		// Recall: Y = MatrixUtils.createRealMatrix(r*(k+1), outputs.size());
+		try
+		{	// Fill matrix Y with the desired outputs
+			Scanner scanner = new Scanner(new File(outputFileOutputs));
+			//int[] index = {0,1}; // Manually add column numbers in field for outputs of choice. Note: count starts from 0. Example: Yield, LAI = {7, 2}
+			int skiprows = 1; // Manually state how many rows need to be skipped: we only need data on last time (e.g. day 19). NOTE: this day != days to harvest necessarily
+			int tempcounter = 0;
+			int i=0;
+			while(scanner.hasNext()){
+				String[] inputArr = scanner.nextLine().split("\\s+"); // delimiter is any amount of whitespace
+				if(tempcounter % skiprows == 0 && tempcounter > 0) {
+					for (int j=0; j<Y.getColumnDimension(); j++) {
+						Y.setEntry(i,j,Double.parseDouble(inputArr[j]));
+					}
+					i++;
+				}
+				tempcounter ++;
+			}
+			scanner.close();
+		}
+		catch(FileNotFoundException e)
+		{
+			println(e.getMessage());
+		}
+		// For each output, each trajectory and for each subsequent 2 parameter points within this trajectory, calculate effect
+		for (int kk = 0; kk< Y.getColumnDimension(); kk++) { // loop over all selected outputs
+			//
+			// Note: Y is r*(k+1) x #outputs matrix.
+			//
+			for (int i=0; i<r; i++) {	// Trajectory number 
+				for (int j = 0; j<k; j++) { // Parameter number 
+					int index = (B_optimal.getRowVector(i*(k+1)+j).subtract(B_optimal.getRowVector(i*(k+1)+j+1)).ebeMultiply(B_optimal.getRowVector(i*(k+1)+j).subtract(B_optimal.getRowVector(i*(k+1)+j+1))) ).getMaxIndex(); //find index (= factor) where subsequent parameter points differ
+					
+					Delta.setEntry(index,0,Math.abs((Double)B_optimal.getEntry(i*(k+1)+j,index)-(Double)B_optimal.getEntry(i*(k+1)+j+1,index))); 
+					double deltaTemp = ( (Double)Delta.getEntry(index,0)*((Double)max.get(index)-(Double)min.get(index)) ); // (re)calculate step size (for QR-methods)
+					if (B_optimal.getEntry(i*(k+1)+j,index) <= B_optimal.getEntry(i*(k+1)+j+1,index)) { // i.e. increased parameter value in next step 
+						// EE[i*k+index][kk] is the effect of the index-th parameter in the i-th trajectory for the kk-th output
+						// NOTE: These are unscaled effects!
+						EE.setEntry(i*k+index,kk, (Double)(Y.getEntry(i*(k+1)+j+1,kk) - Y.getEntry(i*(k+1)+j,kk))/deltaTemp ); 
+					} else { // i.e. decreased parameter value in next step 
+						EE.setEntry(i*k+index,kk, (Double)(Y.getEntry(i*(k+1)+j,kk) - Y.getEntry(i*(k+1)+j+1,kk))/deltaTemp ); 
+					}
+				}
+			}
+		}
+		// Export raw effects to txt file using simple PrintWriter 
+		FileWriter fileWriter = new FileWriter(new File(outputFileEffects));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.printf("%-30s %-30s %-10s %-10s %n", "Parameter", "Output", "Trajectory", "Effect (unscaled)");
+		for(int i = 0; i<r*k; i++) {
+			//printWriter.println();
+			for(int j=0; j<Y.getColumnDimension(); j++) {
+				//printWriter.printf("%-30s %-30s %-10.3f %n", (String) parameterNames.get(i%k), (String) "Y_"+j, (Double) EE.getEntry(i,j)); 
+				printWriter.printf("%-30s %-30s %-10.0f %-10.3f %n", (String) "X_"+(i%k), (String) "Y_"+j, (1+Math.floor((Double) i/k)) ,(Double) EE.getEntry(i,j)); // Specifically for testmodel
+			}
+		}
+		printWriter.close(); 
+	}
+	
+	void elementaryEffectsCalcEffectsRadial() {
+		// Recall: Y = MatrixUtils.createRealMatrix(r*(k+1), outputs.size());
+		try
+		{	// Fill matrix Y with the desired outputs
+			Scanner scanner = new Scanner(new File(outputFileOutputs));
+			int[] index = {2,6,7}; // Manually add column numbers in field for outputs of choice. Note: count starts from 0. Example: Yield, LAI = {7, 2}
+			int skiprows = 159;//time;//harvest[maize]-1; // TEST 14/7/21: time is the final simulation day of the final simulation. If all simulations have the same #days, this should work fine.
+			// Manually state how many rows need to be skipped: we only need data on last time (e.g. day 19). NOTE: this day != days to harvest necessarily
+			int tempcounter = 0;
+			int i=0;
+			while(scanner.hasNext()){
+				String[] inputArr = scanner.nextLine().split("\\s+"); // delimiter is any amount of whitespace
+				if(tempcounter % skiprows == 0 && tempcounter > 0) {
+					for (int j=0; j<Y.getColumnDimension(); j++) {
+						Y.setEntry(i,j,Double.parseDouble(inputArr[index[j]]));
+					}
+					i++;
+				}
+				tempcounter ++;
+			}
+			scanner.close();
+		}
+		catch(FileNotFoundException e)
+		{
+			println(e.getMessage());
+		}
+		// For each output, each trajectory and for each subsequent 2 parameter points within this trajectory, calculate effect
+		for (int kk = 0; kk< Y.getColumnDimension(); kk++) { // loop over all selected outputs
+			//
+			// Note: Y is r*(k+1) x #outputs matrix.
+			//
+			for (int i=0; i<r; i++) {// trajectory number 
+				for (int j = 0; j<k; j++) { // Parameter number
+					Delta.setEntry(j,0,Math.abs((Double)B_optimal.getEntry(i*(k+1),j)-(Double)B_optimal.getEntry(i*(k+1)+j+1,j))); 
+					double deltaTemp = ( (Double)Delta.getEntry(j,0)*((Double)max.get(j)-(Double)min.get(j)) );
+					if (B_optimal.getEntry(i*(k+1),j) <= B_optimal.getEntry(i*(k+1)+j+1,j)) { // i.e. increased parameter value in next step 
+						// EE[i*k+j][kk] is the effect of the j-th parameter in the i-th trajectory for the kk-th output
+						EE.setEntry(i*k+j,kk, ((Double)Y.getEntry(i*(k+1)+j+1,kk) - (Double)Y.getEntry(i*(k+1),kk))/deltaTemp);
+					} else { // i.e. decreased parameter value in next step 
+						EE.setEntry(i*k+j,kk, ((Double)Y.getEntry(i*(k+1),kk) - (Double)Y.getEntry(i*(k+1)+j+1,kk))/deltaTemp); 
+					}
+				}
+			}
+		}
+		// Export raw effects to txt file using simple PrintWriter 
+		FileWriter fileWriter = new FileWriter(new File(outputFileEffects));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.printf("%-30s %-30s %-10s %-10s %n", "Parameter", "Output", "Trajectory", "Effect (unscaled)");
+		for(int i = 0; i<r*k; i++) {
+			//printWriter.println();
+			for(int j=0; j<Y.getColumnDimension(); j++) {
+				//printWriter.printf("%-30s %-30s %-10.3f %n", (String) parameterNames.get(i%k), (String) "Y_"+j, (Double) EE.getEntry(i,j)); 
+				printWriter.printf("%-30s %-30s %-10.0f %-10.3f %n", (String) (i%k+1)+": "+ parameterNames.get(i%k), (String) outputs[j], (1+Math.floor((Double) i/k)) ,(Double) EE.getEntry(i,j)); // Specifically for testmodel
+			}
+		}
+		printWriter.close(); 
+	}
+	
+	/*** ************************ ***/
+	/*** ************************ ***/
+	/*** 	Calculate measures	  ***/	
+	/*** ************************ ***/
+	/*** ************************ ***/
+	
+	void elementaryEffectsCalcMeasures() { 
+		// Scale effects and calculate measures
+		mu = new double[k][Y.getColumnDimension()]; mu_abs = new double[k][Y.getColumnDimension()]; sigma = new double[k][Y.getColumnDimension()]; // Unscaled measures
+		mu_cx = new double[k][Y.getColumnDimension()]; mu_abs_cx = new double[k][Y.getColumnDimension()]; sigma_cx = new double[k][Y.getColumnDimension()]; // Measures scaled by (max_i-min_i)
+		xi = new double[k][Y.getColumnDimension()]; xi_cx = new double[k][Y.getColumnDimension()];
+		for (int kk = 0; kk< Y.getColumnDimension(); kk++) {
+			for (int j = 0; j<k; j++) { 
+				for (int i = 0; i<r; i++) {
+					mu[j][kk] += (Double) EE.getEntry(i*k+j,kk);
+					mu_abs[j][kk] += Math.abs((Double) EE.getEntry(i*k+j,kk));
+				}
+				mu[j][kk] /= r;
+				mu_abs[j][kk] /= r;
+				mu_cx[j][kk] = mu[j][kk]*((Double) max.get(j) - (Double) min.get(j));
+				mu_abs_cx[j][kk] = mu_abs[j][kk]*((Double) max.get(j) - (Double) min.get(j));
+				// Median calculation: first make array of all absolute effects, then use median function to calculate absolute median
+				double[] tempxi = new double[r];
+				for (int i = 0; i<r; i++) {
+					tempxi[i] = Math.abs(EE.getEntry(i*k+j,kk));
+				}
+				xi[j][kk] = new Median().evaluate(tempxi);
+				xi_cx[j][kk] = xi[j][kk]*((Double) max.get(j) - (Double) min.get(j));
+				for (int i = 0; i<r; i++) {
+					sigma[j][kk] += (EE.getEntry(i*k+j,kk)-mu[j][kk])**2;  
+				}
+				sigma[j][kk] /= (r-1);
+				sigma[j][kk] = Math.sqrt(sigma[j][kk]);
+				sigma_cx[j][kk] = sigma[j][kk]*((Double) max.get(j) - (Double) min.get(j));
+			}
+		} 
+		// Export measures to txt file using simple PrintWriter 
+		// Unscaled
+		FileWriter fileWriter = new FileWriter(new File(outputFileMeasuresUnscaled));
+		PrintWriter printWriter = new PrintWriter(fileWriter);
+		printWriter.printf("%-30s %-30s %-10s %-10s %-10s %-10s %n", "Parameter names", "Output", "Mu_i", "Mu*_i", "Chi_i", "Sigma_i");
+		for(int j=0; j<Y.getColumnDimension(); j++){
+			for(int i = 0; i<k; i++) { 
+				printWriter.printf("%-30s %-30s %-10.3f %-10.3f %-10.6f %-10.3f %n", (String) (i+1)+": "+ parameterNames.get(i), (String) outputs[j], mu[i][j], mu_abs[i][j], xi[i][j], sigma[i][j]);
+				//printWriter.printf("%-30s %-30s %-10.3f %-10.3f %-10.6f %-10.3f %n", (String) "X_"+(i), (String) "Y_"+j, mu[i][j], mu_abs[i][j], xi[i][j], sigma[i][j]);
+			}
+		}
+		printWriter.close(); 
+		// Scaled by (max_i-min_i), includes dimensionless sensitivity indices S_i = Chi_i/sum(Chi_j) and S_i = Mu_i^*/sum(Mu_j^*).
+		double[][] S_dimless = new double[k][Y.getColumnDimension()]; double[][] S_dimless2 = new double[k][Y.getColumnDimension()]; 
+		double[] xisum = new double[Y.getColumnDimension()];  double[] musum = new double[Y.getColumnDimension()];
+		FileWriter fileWriter2 = new FileWriter(new File(outputFileMeasuresScaled));
+		PrintWriter printWriter2 = new PrintWriter(fileWriter2);
+		printWriter2.printf("%-30s %-30s %-10s %-10s %-10s %-10s %n", "Parameter names", "Output", "Mu_i", "Mu*_i", "Chi_i", "Sigma_i");
+		for(int j=0; j<Y.getColumnDimension(); j++){
+			for(int i = 0; i<k; i++) { 
+				printWriter2.printf("%-30s %-30s %-10.3f %-10.3f %-10.6f %-10.3f %n", (String) (i+1)+": "+ parameterNames.get(i), (String) outputs[j], mu_cx[i][j], mu_abs_cx[i][j], xi_cx[i][j], sigma_cx[i][j]);
+				//printWriter2.printf("%-30s %-30s %-10.3f %-10.3f %-10.6f %-10.3f %n", (String) "X_"+(i), (String) "Y_"+j, mu_cx[i][j], mu_abs_cx[i][j], xi_cx[i][j], sigma_cx[i][j]);
+				xisum[j] += xi_cx[i][j];
+				musum[j] += mu_abs_cx[i][j];
+			}
+		}
+		printWriter2.println("");
+		printWriter2.printf("%-30s %n", (String) "Dimensionless sensitivity indices:");
+		printWriter2.printf("%-30s %-30s %-20s %-20s %n", (String) "Parameter", (String) "Output", "S_Xi", "S_mu*");
+		for(int j=0; j<Y.getColumnDimension(); j++){
+			for(int i = 0; i<k; i++) { 
+				S_dimless[i][j] = xi_cx[i][j]/xisum[j];
+				S_dimless2[i][j] = mu_abs_cx[i][j]/musum[j];
+				//printWriter2.printf("%-30s %-30s %-20.6f %-20.6f %n", (String) "X_"+(i), (String) "Y_"+j, S_dimless[i][j], S_dimless2[i][j]);
+				printWriter2.printf("%-30s %-30s %-20.6f %-20.6f %n", (String) (i+1)+": "+ parameterNames.get(i), (String) outputs[j], S_dimless[i][j], S_dimless2[i][j]);
+			}
+		}
+		printWriter2.println("");
+		// Order sensitivity indices and output ordered parameters from highest to lowest; determine (un)important parameters; 
+		for(int j=0; j<Y.getColumnDimension(); j++) { 
+			RealVector temparray = new ArrayRealVector(k);
+			RealVector indexes = new ArrayRealVector(k);
+			double[] indexestemp = new double[k];
+			RealVector temparray2 = new ArrayRealVector(k);
+			RealVector indexes2 = new ArrayRealVector(k);
+			for(int i = 0; i<k; i++) {
+				temparray.setEntry(i,S_dimless[i][j]);
+				temparray2.setEntry(i,S_dimless2[i][j]);
+			}
+			for(int i = 0; i<k; i++) {
+				//println(Arrays.toString(temparray));
+				int tempindex = temparray.getMaxIndex();
+				if(temparray.getEntry(tempindex)==0){
+					indexestemp = indexes.toArray();
+					Arrays.sort(indexestemp);
+					int tempint = 1;
+					for(int kk=0; kk<k; kk++){
+						if(indexestemp[kk]==tempint ){ tempint++;}
+					}
+					indexes.setEntry(i,Integer.parseInt(tempint));
+					temparray.setEntry(tempint-1,-1); //TEST
+				} else {
+					indexes.setEntry(i,Integer.parseInt(tempindex+1));
+					temparray.setEntry(tempindex,-1);
+				}
+				int tempindex2 = temparray2.getMaxIndex();
+				if(temparray2.getEntry(tempindex2)==0){
+					indexestemp = indexes2.toArray();
+					Arrays.sort(indexestemp);
+					int tempint = 1;
+					for(int kk=0; kk<k; kk++){
+						if(indexestemp[kk]==tempint ){ tempint++;}
+					}
+					indexes2.setEntry(i,Integer.parseInt(tempint));
+					temparray2.setEntry(tempint-1,-1); //TEST
+				} else {
+					indexes2.setEntry(i,Integer.parseInt(tempindex2+1));
+					temparray2.setEntry(tempindex2,-1);
+				}
+			}
+			int[] tempindexes = new int[k]; int[] tempindexes2 = new int[k];
+			
+			for(int i = 0; i<k; i++){
+				tempindexes[i] = (int) indexes.getEntry(i);
+				tempindexes2[i] = (int) indexes2.getEntry(i);
+			}
+			printWriter2.printf("%-50s %-30s %n", (String) "sorted parameters (high to low) according to S_xi/S_mu", (String) "and output "+outputs[j]);
+			printWriter2.println("S_xi: " + Arrays.toString(tempindexes));
+			printWriter2.println("S_mu: " + Arrays.toString(tempindexes2));
+			printWriter2.println("");
+			
+			// Given output j and threshhold h, determine which paramaters are (un)important. 
+			for(int hh = 0; hh<h.length; hh++){
+				// Based on S_xi:
+				int thresholdtemp = 0; 
+				double thresholdtempd = 0;
+				// find unimportant group
+				while(thresholdtempd < 1.0*h[hh]/100){
+					thresholdtempd += S_dimless[(int) indexes.getEntry(k-1-thresholdtemp)-1][j];
+					thresholdtemp++;
+				}
+				int[] unimportantfactors = new int[thresholdtemp];
+				for(int i=0; i<thresholdtemp; i++){
+					unimportantfactors[i] = (int) indexes.getEntry(k-1-i);	
+				}
+				double tresholdactive = 0; // Mean + x*std of inactive factors?
+				double unimportantfactorsmean = 0;
+				for(int i=0; i<thresholdtemp; i++){
+					unimportantfactorsmean += 1.0/thresholdtemp*S_dimless[(int) indexes.getEntry(k-1-i)-1][j]; 	
+				}
+				for(int i=0; i<thresholdtemp; i++){
+					tresholdactive += 1.0/(thresholdtemp-1)*(S_dimless[(int) indexes.getEntry(k-1-i)-1][j]-unimportantfactorsmean)**2; 	
+				}
+				tresholdactive = 3*Math.sqrt(tresholdactive); // TEST/TODO/SET: this determines the threshold. Currently mean+3std of unimportant factors.
+				tresholdactive += unimportantfactorsmean;
+				//println("Thresholdactive (S_xi) " + tresholdactive);
+				int thresholdtemp2 = 0; 
+				double thresholdtempd2 = 1;
+				// find important group
+				while(thresholdtempd2 > tresholdactive){
+					thresholdtempd2 = S_dimless[(int) indexes.getEntry(thresholdtemp2)-1][j];
+					thresholdtemp2++;
+				}
+				int[] importantfactors = new int[(int) Math.max(thresholdtemp2-1,0)]; // While loop continues one loop too much; correct here.
+				for(int i=0; i<thresholdtemp2-1; i++){
+					importantfactors[i] = (int) indexes.getEntry(i);	
+				}
+				printWriter2.printf("%-50s %-30s %n", (String) "(Un)important parameters according to S_xi and threshold h = "+h[hh]+"%", (String) "and output "+ outputs[j]);
+				printWriter2.println("Unimportant: " + Arrays.toString(unimportantfactors));
+				printWriter2.println("Important: " + Arrays.toString(importantfactors));
+				
+				// Based on S_mu
+				// Given output j and threshhold h, determine which paramaters are (un)important. 
+				//int thresholdindex = -1;
+				thresholdtemp = 0; 
+				thresholdtempd = 0;
+				// find unimportant group
+				while(thresholdtempd < 1.0*h[hh]/100){
+					thresholdtempd += S_dimless[(int) indexes2.getEntry(k-1-thresholdtemp)-1][j];
+					thresholdtemp++;
+				}
+				int[] unimportantfactors2 = new int[thresholdtemp];
+				for(int i=0; i<thresholdtemp; i++){
+					unimportantfactors2[i] = (int) indexes2.getEntry(k-1-i);	
+				}
+				tresholdactive = 0; // Mean + x*std of inactive factors?
+				unimportantfactorsmean = 0;
+				for(int i=0; i<thresholdtemp; i++){
+					unimportantfactorsmean += 1.0/thresholdtemp*S_dimless2[(int) indexes2.getEntry(k-1-i)-1][j]; 	
+				}
+				for(int i=0; i<thresholdtemp; i++){
+					tresholdactive += 1.0/(thresholdtemp-1)*(S_dimless2[(int) indexes2.getEntry(k-1-i)-1][j]-unimportantfactorsmean)**2; 	
+				}
+				tresholdactive = 3*Math.sqrt(tresholdactive); // TEST/TODO/SET: this determines the threshold. Currently mean+3std of unimportant factors.
+				tresholdactive += unimportantfactorsmean;
+				//println("Thresholdactive (S_mu) " + tresholdactive);
+				thresholdtemp2 = 0; 
+				thresholdtempd2 = 1;
+				// find important group
+				while(thresholdtempd2 > tresholdactive){
+					thresholdtempd2 = S_dimless2[(int) indexes2.getEntry(thresholdtemp2)-1][j];
+					thresholdtemp2++;
+				}
+				int[] importantfactors2 = new int[(int) Math.max(thresholdtemp2-1,0)]; // While loop continues one loop too much; correct here.
+				for(int i=0; i<thresholdtemp2-1; i++){
+					importantfactors2[i] = (int) indexes2.getEntry(i);	
+				}
+				printWriter2.println();
+				printWriter2.printf("%-50s %-30s %n", (String) "(Un)important parameters according to S_mu and threshold h = "+h[hh]+"%", (String) "and output "+ outputs[j]);
+				printWriter2.println("Unimportant: " + Arrays.toString(unimportantfactors2));
+				printWriter2.println("Important: " + Arrays.toString(importantfactors2));
+				printWriter2.println();
+			}
+		}	
+		printWriter2.close(); 
+	}  
+	
+	/*** ************************ ***/
+	/*** ************************ ***/
+	/*** 	Other				  ***/	
+	/*** ************************ ***/
+	/*** ************************ ***/
+	
+	void elementaryEffectsReadInParamBounds() { 
+		// Read in txt file containing parameters to be taken into account, together with lower and upper bounds, # levels (because boolean/int require different amount than double) and type (double/int/boolean)
+		try
+		{
+			Scanner scanner = new Scanner(new File(inputFileParameters));
+			scanner.nextLine(); // Skip headers
+			int itemp = 0;
+			while(scanner.hasNext()){
+				String[] inputArr = scanner.nextLine().split("\\s+"); // delimiter is any amount of whitespace //split(",");
+				parameterNames.add(inputArr[0]);
+				min.add(Double.parseDouble(inputArr[1])); 
+				max.add(Double.parseDouble(inputArr[2]));
+				ptemp.add(Integer.parseInt(inputArr[3]));
+				typetemp.add(Integer.parseInt(inputArr[4]));
+				cdeltatemp.add(Integer.parseInt(inputArr[5]));
+				itemp++;
+			}
+			scanner.close();
+		}
+		catch(FileNotFoundException e)
+		{
+			println(e.getMessage());
+		}
+		k= parameterNames.size();
+		Delta = MatrixUtils.createRealMatrix(k,1);
+		p = new int[k];
+		type = new int[k];
+		cdelta= new int[k];
+		for(int i=0; i<k; i++){
+			p[i] = (Integer) ptemp.get(i);
+			type[i] = (Integer) typetemp.get(i);
+			cdelta[i] = (Integer) cdeltatemp.get(i);
+			Delta.setEntry(i,0,(double) cdelta[i]/(1.0*(p[i]-1)));
+		}
+		parameterValues = new double[k];
+		println("Num of parameters = " + k + " Num of trajectories " + r);
+	}
+	
+/* 	void elementaryEffectsSetNextParameterPoint(int simnr) { 
+		// Run simulations with correct parameter sets, store outputs
+		// Take B_optimal, which consists of submatrices representing a trajectory, in which each row is a point in parameterspace.
+		//for (int i=0; i<k; i++) {
+		double[] tempvalue = B_optimal.getRow(simnr);
+		for(int i=0; i<X_double.length; i++) {
+			X_double[i] = tempvalue[i]; 	// double
+		}
+		for(int i=0; i<X_int.length; i++) {
+			X_int[i] = (int) tempvalue[X_double.length+i]; 	// int
+		}
+		for(int i=0; i<X_boolean.length; i++) {
+			if(tempvalue[X_int.length+X_double.length+i]==1) {X_boolean[i] = true;}
+			else {X_boolean[i] = false;}// boolean
+		}
+		//}
+	} */
+	
+	void elementaryEffectsSetNextParameterPoint(int simnr) { 
+			// Run simulations with correct parameter sets, store outputs
+			// Take B_optimal, which consists of submatrices representing a trajectory, in which each row is a point in parameterspace.
+			//for (int i=0; i<k; i++) {
+				//double[] tempvalue = B_optimal.getRow(simnr);
+				//double[] tempvalue = new double[k];
+				try 
+				{
+					Scanner scanner = new Scanner(new File(inputFileSimulationPoints));
+					for(int i=0; i<simnr; i++){
+						scanner.nextLine();
+					}
+					String[] tempvalue = scanner.nextLine().split("\\s+");
+					//println(Arrays.toString(tempvalue)); 
+					
+				delay[commonbean]					= (int) Math.floor(Double.parseDouble(tempvalue[1-1]));	
+				wmaxLeaf[commonbean]				= Double.parseDouble(tempvalue[2-1]);
+				nitro[commonbean]					= Double.parseDouble(tempvalue[3-1]);
+				LMA[commonbean]						= Double.parseDouble(tempvalue[4-1]);
+				tb[commonbean]			            = Double.parseDouble(tempvalue[5-1]);
+				phyllochron[commonbean]	            = Double.parseDouble(tempvalue[6-1]);
+				global_alpha_helix	                = Double.parseDouble(tempvalue[7-1]);
+				//if(delay[commonbean] > 41) { haltManual = 100+(delay[commonbean] - 41); }
+
+				scanner.close();
+				}
+				catch(FileNotFoundException e)
+				{
+					println(e.getMessage());
+				}
+			//}
+	}
+	
+	int elementaryEffectsGetNrSims() { 
+		//return r*(k+1);
+
+      int lines = 0;
+      try
+		{
+			Scanner scanner = new Scanner(new File(inputFileSimulationPoints));
+			while(scanner.hasNextLine()){
+				lines++;
+				scanner.nextLine();
+			}
+			scanner.close();
+		}
+		catch(FileNotFoundException e)
+		{
+			println(e.getMessage());
+		}
+		//println(lines);
+		return lines;
+	}
+	
+	
+	/*** ************************ ***/
+	/*** ************************ ***/
+	/*** DEPRECATED -- NOT IN USE ***/	
+	/*** ************************ ***/
+	/*** ************************ ***/
+	
+	/* 	private void calcDiscrepancy(RealMatrix B) { //note: calculations should be done on [0,1]^k. // wrap-around L2 discrepancy
+		discrepancy = 0;
+		double temp1=0;
+		double temp2=1;
+		for(int i=0; i<r*(k+1); i++){
+			for(int ii=0; ii<r*(k+1); ii++){
+				for(int j=0; j<k; j++){
+					temp2*=( 3.0/2 -  Math.abs((Double) B.getEntry(i,j)- (Double) B.getEntry(ii,j)) * (1-Math.abs((Double) B.getEntry(i,j)- (Double) B.getEntry(ii,j)))  );
+				}
+				temp1 += temp2;
+				temp2 =1;
+			}
+		}
+		temp1 /= (r*(k+1))**2;
+		discrepancy = temp1-(4.0/3)**k;
+		println("Discrepancy^2 = " + discrepancy);
+		println("Discrepancy^2 * r / [(3/2)^k-(4/3)^k]] = " + discrepancy*r*1.0/((3.0/2)**k-(4.0/3)**k));
+	} */
+}
