@@ -1,0 +1,12 @@
+graph2bitmap            Save currently active R graph to bitmap format
+graph2office            Save currently active R graph to Microsoft
+                        Office / LibreOffice format
+graph2vector            Save currently active R graph to vector format
+rgl2bitmap              Save currently active rgl 3D graph to bitmap
+                        format
+table2office            Export statistical output to a table in
+                        Microsoft Office / LibreOffice format
+table2spreadsheet       Export statistical output to a table in
+                        spreadsheet compatible format (.xlsx or .csv)
+table2tex               Export statistical output to HTML or Latex
+                        table
